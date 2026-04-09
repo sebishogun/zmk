@@ -816,11 +816,45 @@ static int zmk_rgb_underglow_apply_merged_rgbmap() {
                 continue;
             }
 
-            // set pixel color for non-transparent keys
-            pixels[pixel] =
-                hex_to_rgb((color & 0xFF0000) >> 16, (color & 0xFF00) >> 8, color & 0xFF);
+            // Extract per-key effect from upper 8 bits, RGB from lower 24
+            {
+                int effect_mode = (color >> 24) & 0xFF;
+                int rgb_color = color & 0xFFFFFF;
+                struct led_rgb pixel_color = hex_to_rgb(
+                    (rgb_color >> 16) & 0xFF, (rgb_color >> 8) & 0xFF, rgb_color & 0xFF);
 
-            if (color > 0) {
+                switch (effect_mode) {
+                case 1: { // breathe — modulate brightness sinusoidally
+                    int brt = abs((int)(state.animation_step % 2400) - 1200) * 255 / 1200;
+                    pixel_color.r = pixel_color.r * brt / 255;
+                    pixel_color.g = pixel_color.g * brt / 255;
+                    pixel_color.b = pixel_color.b * brt / 255;
+                    break;
+                }
+                case 2: { // pulse — short flash, long off
+                    int phase = state.animation_step % 1200;
+                    if (phase > 300) {
+                        pixel_color.r = 0;
+                        pixel_color.g = 0;
+                        pixel_color.b = 0;
+                    }
+                    break;
+                }
+                case 3: // reserved for future (rainbow shift)
+                    break;
+                case 4: // dim — 50% brightness
+                    pixel_color.r /= 2;
+                    pixel_color.g /= 2;
+                    pixel_color.b /= 2;
+                    break;
+                default: // 0 = static, no modification
+                    break;
+                }
+
+                pixels[pixel] = pixel_color;
+            }
+
+            if ((color & 0xFFFFFF) > 0) {
                 rc = 1; // layer has at least one pixel up
             }
         } // end for each pixel
