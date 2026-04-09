@@ -24,7 +24,15 @@
 #include <zmk/event_manager.h>
 #include <zmk/events/activity_state_changed.h>
 #include <zmk/events/usb_conn_state_changed.h>
+#include <zmk/events/layer_state_changed.h>
 #include <zmk/workqueue.h>
+
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+#include <zmk/rgb_underglow_layer.h>
+#include <zmk/keymap.h>
+#include <zmk/behavior.h>
+#include <drivers/behavior.h>
+#endif
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -36,6 +44,11 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #define STRIP_CHOSEN DT_CHOSEN(zmk_underglow)
 #define STRIP_NUM_PIXELS DT_PROP(STRIP_CHOSEN, chain_length)
+
+#if DT_HAS_COMPAT_STATUS_OKAY(zmk_underglow_layer) && IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+#define UNDERGLOW_LAYER_ENABLED 1
+static int zmk_rgb_underglow_apply_merged_rgbmap(void);
+#endif
 
 #define HUE_MAX 360
 #define SAT_MAX 100
@@ -49,7 +62,11 @@ enum rgb_underglow_effect {
     UNDERGLOW_EFFECT_BREATHE,
     UNDERGLOW_EFFECT_SPECTRUM,
     UNDERGLOW_EFFECT_SWIRL,
-    UNDERGLOW_EFFECT_NUMBER // Used to track number of underglow effects
+#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
+    UNDERGLOW_EFFECT_PER_KEY_ONLY, // Per-key colors only, no background
+#endif
+    UNDERGLOW_EFFECT_OFF,          // All LEDs off
+    UNDERGLOW_EFFECT_NUMBER
 };
 
 struct rgb_underglow_state {
@@ -189,7 +206,22 @@ static void zmk_rgb_underglow_tick(struct k_work *work) {
     case UNDERGLOW_EFFECT_SWIRL:
         zmk_rgb_underglow_effect_swirl();
         break;
+#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
+    case UNDERGLOW_EFFECT_PER_KEY_ONLY:
+        memset(pixels, 0, sizeof(struct led_rgb) * STRIP_NUM_PIXELS);
+        break;
+#endif
+    case UNDERGLOW_EFFECT_OFF:
+        memset(pixels, 0, sizeof(struct led_rgb) * STRIP_NUM_PIXELS);
+        break;
     }
+
+    // Always overlay per-key colors on top of whatever effect just ran
+#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
+    if (state.current_effect != UNDERGLOW_EFFECT_OFF) {
+        zmk_rgb_underglow_apply_merged_rgbmap();
+    }
+#endif
 
     int err = led_strip_update_rgb(led_strip, pixels, STRIP_NUM_PIXELS);
     if (err < 0) {
@@ -461,7 +493,8 @@ int zmk_rgb_underglow_change_spd(int direction) {
 }
 
 #if IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_AUTO_OFF_IDLE) ||                                          \
-    IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_AUTO_OFF_USB)
+    IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_AUTO_OFF_USB) ||                                           \
+    IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
 struct rgb_underglow_sleep_state {
     bool is_awake;
     bool rgb_state_before_sleeping;
@@ -505,12 +538,19 @@ static int rgb_underglow_event_listener(const zmk_event_t *eh) {
     }
 #endif
 
+#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
+    if (as_zmk_layer_state_changed(eh)) {
+        uint8_t layer = zmk_keymap_highest_layer_active();
+        zmk_rgb_underglow_set_layer(layer, true);
+        return 0;
+    }
+#endif
+
     return -ENOTSUP;
 }
 
 ZMK_LISTENER(rgb_underglow, rgb_underglow_event_listener);
-#endif // IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_AUTO_OFF_IDLE) ||
-       // IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_AUTO_OFF_USB)
+#endif
 
 #if IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_AUTO_OFF_IDLE)
 ZMK_SUBSCRIPTION(rgb_underglow, zmk_activity_state_changed);
@@ -519,5 +559,131 @@ ZMK_SUBSCRIPTION(rgb_underglow, zmk_activity_state_changed);
 #if IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_AUTO_OFF_USB)
 ZMK_SUBSCRIPTION(rgb_underglow, zmk_usb_conn_state_changed);
 #endif
+
+#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
+ZMK_SUBSCRIPTION(rgb_underglow, zmk_layer_state_changed);
+#endif
+
+#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
+
+static struct led_rgb hex_to_rgb(uint8_t r, uint8_t g, uint8_t b) {
+    struct zmk_led_hsb hsb = state.color;
+    return (struct led_rgb){
+        r : (hsb.b * (r)) / 0xff,
+        g : (hsb.b * (g)) / 0xff,
+        b : (hsb.b * (b)) / 0xff
+    };
+}
+
+static int zmk_rgb_underglow_apply_merged_rgbmap(void) {
+    int rc = 0;
+    size_t len = 0;
+    uint8_t active_layers[ZMK_KEYMAP_LAYERS_LEN];
+    uint32_t layer_state = zmk_keymap_layer_state();
+
+    for (uint8_t layer = ZMK_KEYMAP_LAYERS_LEN - 1; layer > 0; layer--) {
+        if ((layer_state & (BIT(layer))) == (BIT(layer))) {
+            active_layers[len++] = layer;
+        }
+    }
+    active_layers[len++] = 0; // default layer
+
+    if (rgb_underglow_get_bindings(active_layers[0]) == NULL) {
+        return 0;
+    }
+
+    for (int pixel = 0; pixel < STRIP_NUM_PIXELS; pixel++) {
+        uint8_t midx = rgb_pixel_lookup(pixel);
+        int color = 0;
+        bool is_transparent = true;
+
+        if (midx < ZMK_KEYMAP_LEN) {
+            for (int layer = 0; layer < len; layer++) {
+                const struct zmk_behavior_binding *bindings =
+                    rgb_underglow_get_bindings(active_layers[layer]);
+                if (bindings != NULL) {
+                    const struct device *dev =
+                        zmk_behavior_get_binding(bindings[midx].behavior_dev);
+                    if (dev != NULL) {
+                        const struct behavior_driver_api *api =
+                            (const struct behavior_driver_api *)dev->api;
+                        if (api->binding_pressed != NULL) {
+                            struct zmk_behavior_binding_event event = {
+                                .position = midx,
+                                .layer = active_layers[layer],
+                                .timestamp = k_uptime_get()
+                            };
+                            color = api->binding_pressed(
+                                (struct zmk_behavior_binding *)&bindings[midx], event);
+                            if (color == ZMK_BEHAVIOR_TRANSPARENT) {
+                                color = 0;
+                                continue;
+                            }
+                            is_transparent = false;
+                        }
+                    }
+                }
+                break;
+            }
+
+            // Skip transparent keys — leave base animation intact
+            if (is_transparent || ((color >> 24) & 0xFF) == 0xFF) {
+                continue;
+            }
+
+            // Extract per-key effect from upper 8 bits, RGB from lower 24
+            int effect_mode = (color >> 24) & 0xFF;
+            int rgb_color = color & 0xFFFFFF;
+            struct led_rgb pixel_color = hex_to_rgb(
+                (rgb_color >> 16) & 0xFF, (rgb_color >> 8) & 0xFF, rgb_color & 0xFF);
+
+            switch (effect_mode) {
+            case 1: { // breathe
+                int brt = abs((int)(state.animation_step % 2400) - 1200) * 255 / 1200;
+                pixel_color.r = pixel_color.r * brt / 255;
+                pixel_color.g = pixel_color.g * brt / 255;
+                pixel_color.b = pixel_color.b * brt / 255;
+                break;
+            }
+            case 2: { // pulse
+                int phase = state.animation_step % 1200;
+                if (phase > 300) {
+                    pixel_color.r = 0;
+                    pixel_color.g = 0;
+                    pixel_color.b = 0;
+                }
+                break;
+            }
+            case 4: // dim
+                pixel_color.r /= 2;
+                pixel_color.g /= 2;
+                pixel_color.b /= 2;
+                break;
+            default:
+                break;
+            }
+
+            pixels[pixel] = pixel_color;
+
+            if ((color & 0xFFFFFF) > 0) {
+                rc = 1;
+            }
+        }
+    }
+    return rc;
+}
+
+static void zmk_rgb_underglow_set_layer(uint8_t layer, bool wakeup) {
+    if (state.on) {
+        // Tick handler will apply overlay on next frame
+        if (!k_work_is_pending(&underglow_tick_work)) {
+            k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &underglow_tick_work);
+        }
+    } else if (wakeup) {
+        zmk_rgb_underglow_on();
+    }
+}
+
+#endif /* IS_ENABLED(UNDERGLOW_LAYER_ENABLED) */
 
 SYS_INIT(zmk_rgb_underglow_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
