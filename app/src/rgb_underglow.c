@@ -63,6 +63,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #if DT_HAS_COMPAT_STATUS_OKAY(zmk_underglow_layer) && IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
 #define UNDERGLOW_LAYER_ENABLED 1
 static void zmk_rgb_underglow_set_layer(uint8_t layer, bool wakeup);
+static int zmk_rgb_underglow_apply_merged_rgbmap(void);
 #endif
 
 #define HUE_MAX 360
@@ -751,7 +752,7 @@ static struct led_rgb hex_to_rgb(uint8_t r, uint8_t g, uint8_t b) {
     };
 }
 
-static int zmk_rgb_underglow_apply_merged_rgbmap() {
+static int zmk_rgb_underglow_apply_merged_rgbmap(void) {
     LOG_DBG("applying merged rgbmap");
     int rc = 0;
     size_t len = 0;
