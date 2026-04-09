@@ -703,7 +703,12 @@ int zmk_rgb_underglow_select_effect(int effect) {
     }
 
     state.current_effect = effect;
-    // Don't reset animation_step — keeps transition smooth without flicker
+    // Don't reset animation_step — keeps transition smooth without flicker.
+    // Immediately submit a tick so the new effect renders on the next frame
+    // without waiting for the timer interval (prevents brief blackout).
+    if (state.on && !k_work_is_pending(&underglow_tick_work)) {
+        k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &underglow_tick_work);
+    }
     return zmk_rgb_underglow_save_state();
 }
 
