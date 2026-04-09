@@ -802,7 +802,7 @@ static int zmk_rgb_underglow_apply_merged_rgbmap() {
                                 color = 0;
                                 continue;
                             }
-                            is_transparent = false; // found an explicit color (even if black)
+                            is_transparent = false;
                         } // end if binding_pressed != NULL
                     } // end if dev != NULL
                 } // end if bindings != NULL
@@ -810,9 +810,9 @@ static int zmk_rgb_underglow_apply_merged_rgbmap() {
                 break;
             } // end for each active layer
 
-            // Skip transparent keys — leave pixel buffer untouched so base
-            // animation (breathe, spectrum, etc.) shows through on these LEDs
-            if (is_transparent) {
+            // Check for transparent: either fell through all layers,
+            // or upper byte is 0xFF (explicit transparent marker)
+            if (is_transparent || ((color >> 24) & 0xFF) == 0xFF) {
                 continue;
             }
 
