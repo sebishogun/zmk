@@ -78,10 +78,14 @@ enum rgb_underglow_effect {
     UNDERGLOW_EFFECT_BREATHE,
     UNDERGLOW_EFFECT_SPECTRUM,
     UNDERGLOW_EFFECT_SWIRL,
-#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED) && !IS_ENABLED(CONFIG_ZMK_RGB_OVERLAY_ALWAYS)
+#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
+#if !IS_ENABLED(CONFIG_ZMK_RGB_OVERLAY_ALWAYS)
     UNDERGLOW_EFFECT_LAYER_INDICATORS, // Legacy: per-key RGB as separate cyclable effect
 #endif
-    UNDERGLOW_EFFECT_NUMBER // Used to track number of underglow effects
+    UNDERGLOW_EFFECT_PER_KEY_ONLY, // Per-key colors only, no background animation
+#endif
+    UNDERGLOW_EFFECT_OFF,          // All LEDs off
+    UNDERGLOW_EFFECT_NUMBER
 };
 
 struct rgb_underglow_state {
@@ -482,11 +486,23 @@ static void zmk_rgb_underglow_tick(struct k_work *work) {
         zmk_rgb_underglow_effect_layer();
         break;
 #endif
+#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
+    case UNDERGLOW_EFFECT_PER_KEY_ONLY:
+        // Black background — overlay adds only pinned keys
+        memset(pixels, 0, sizeof(struct led_rgb) * STRIP_NUM_PIXELS);
+        break;
+#endif
+    case UNDERGLOW_EFFECT_OFF:
+        // Everything off
+        memset(pixels, 0, sizeof(struct led_rgb) * STRIP_NUM_PIXELS);
+        break;
     }
 
-    // Always-overlay mode: per-key colors applied after every effect
+    // Overlay per-key colors on top (skip for OFF mode)
 #if IS_ENABLED(UNDERGLOW_LAYER_ENABLED) && IS_ENABLED(CONFIG_ZMK_RGB_OVERLAY_ALWAYS)
-    zmk_rgb_underglow_apply_merged_rgbmap();
+    if (state.current_effect != UNDERGLOW_EFFECT_OFF) {
+        zmk_rgb_underglow_apply_merged_rgbmap();
+    }
 #endif
 
     zmk_led_write_pixels();
@@ -686,9 +702,8 @@ int zmk_rgb_underglow_select_effect(int effect) {
         return -EINVAL;
     }
 
-    // When entering layer mode, remember the current animation as the base
     state.current_effect = effect;
-    state.animation_step = 0;
+    // Don't reset animation_step — keeps transition smooth without flicker
     return zmk_rgb_underglow_save_state();
 }
 
