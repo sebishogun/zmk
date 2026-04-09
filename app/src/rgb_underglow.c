@@ -86,6 +86,7 @@ struct rgb_underglow_state {
     struct zmk_led_hsb color;
     uint8_t animation_speed;
     uint8_t current_effect;
+    uint8_t base_effect; // remembers the animation to run under per-key colors
     uint16_t animation_step;
     bool on;
     bool status_active;
@@ -212,21 +213,35 @@ static void zmk_rgb_underglow_effect_swirl(void) {
 }
 
 #if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
-static void zmk_rgb_underglow_effect_layer(void) {
-    bool active = false;
-    for (int i = 0; i < STRIP_NUM_PIXELS; i++) {
-        pixels[i].r -= state.animation_speed < pixels[i].r ? state.animation_speed : pixels[i].r;
-        pixels[i].g -= state.animation_speed < pixels[i].g ? state.animation_speed : pixels[i].g;
-        pixels[i].b -= state.animation_speed < pixels[i].b ? state.animation_speed : pixels[i].b;
-        if (pixels[i].r || pixels[i].g || pixels[i].b) {
-            active = true;
-        }
+static void zmk_rgb_underglow_run_base_animation(void) {
+    // Run the base animation effect to fill pixels[] as background.
+    // Per-key colors will be overlaid on top (transparent keys keep this).
+    switch (state.base_effect) {
+    case UNDERGLOW_EFFECT_SOLID:
+        zmk_rgb_underglow_effect_solid();
+        break;
+    case UNDERGLOW_EFFECT_BREATHE:
+        zmk_rgb_underglow_effect_breathe();
+        break;
+    case UNDERGLOW_EFFECT_SPECTRUM:
+        zmk_rgb_underglow_effect_spectrum();
+        break;
+    case UNDERGLOW_EFFECT_SWIRL:
+        zmk_rgb_underglow_effect_swirl();
+        break;
+    default:
+        zmk_rgb_underglow_effect_solid();
+        break;
     }
-    state.animation_step += state.animation_speed;
+}
 
-    if (state.animation_step > 255 || !active) {
-        zmk_rgb_underglow_transient_off();
-    }
+static void zmk_rgb_underglow_effect_layer(void) {
+    // First: run the base animation to fill pixels[] on all LEDs
+    zmk_rgb_underglow_run_base_animation();
+    // Then: overlay per-key colors from the underglow-layer.
+    // Keys with &trans (transparent) leave the base animation pixel untouched.
+    // Keys with &ug 0xRRGGBB override the pixel with the static color.
+    zmk_rgb_underglow_apply_merged_rgbmap();
 }
 #endif // IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
 
@@ -701,6 +716,13 @@ int zmk_rgb_underglow_select_effect(int effect) {
         return -EINVAL;
     }
 
+    // When entering layer mode, remember the current animation as the base
+    // so it can run underneath per-key static colors (transparent keys show it)
+#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
+    if (effect == UNDERGLOW_EFFECT_LAYER_INDICATORS && state.current_effect != UNDERGLOW_EFFECT_LAYER_INDICATORS) {
+        state.base_effect = state.current_effect;
+    }
+#endif
     state.current_effect = effect;
     state.animation_step = 0;
 #if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
@@ -752,6 +774,7 @@ static int zmk_rgb_underglow_apply_merged_rgbmap() {
     for (int pixel = 0; pixel < STRIP_NUM_PIXELS; pixel++) {
         uint8_t midx = rgb_pixel_lookup(pixel);
         int color = 0;
+        bool is_transparent = true; // assume transparent until we find a color
         if (midx >= ZMK_KEYMAP_LEN) {
             LOG_DBG("out of range");
         } else {
@@ -778,6 +801,7 @@ static int zmk_rgb_underglow_apply_merged_rgbmap() {
                                 color = 0;
                                 continue;
                             }
+                            is_transparent = false; // found an explicit color (even if black)
                         } // end if binding_pressed != NULL
                     } // end if dev != NULL
                 } // end if bindings != NULL
@@ -785,7 +809,13 @@ static int zmk_rgb_underglow_apply_merged_rgbmap() {
                 break;
             } // end for each active layer
 
-            // set pixel color
+            // Skip transparent keys — leave pixel buffer untouched so base
+            // animation (breathe, spectrum, etc.) shows through on these LEDs
+            if (is_transparent) {
+                continue;
+            }
+
+            // set pixel color for non-transparent keys
             pixels[pixel] =
                 hex_to_rgb((color & 0xFF0000) >> 16, (color & 0xFF00) >> 8, color & 0xFF);
 
