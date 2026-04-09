@@ -78,8 +78,8 @@ enum rgb_underglow_effect {
     UNDERGLOW_EFFECT_BREATHE,
     UNDERGLOW_EFFECT_SPECTRUM,
     UNDERGLOW_EFFECT_SWIRL,
-#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
-    UNDERGLOW_EFFECT_LAYER_INDICATORS,
+#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED) && !IS_ENABLED(CONFIG_ZMK_RGB_OVERLAY_ALWAYS)
+    UNDERGLOW_EFFECT_LAYER_INDICATORS, // Legacy: per-key RGB as separate cyclable effect
 #endif
     UNDERGLOW_EFFECT_NUMBER // Used to track number of underglow effects
 };
@@ -88,11 +88,9 @@ struct rgb_underglow_state {
     struct zmk_led_hsb color;
     uint8_t animation_speed;
     uint8_t current_effect;
-    uint8_t base_effect; // remembers the animation to run under per-key colors
     uint16_t animation_step;
     bool on;
     bool status_active;
-    bool layer_enabled;
     uint16_t status_animation_step;
 };
 
@@ -214,38 +212,20 @@ static void zmk_rgb_underglow_effect_swirl(void) {
     state.animation_step = state.animation_step % HUE_MAX;
 }
 
-#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
-static void zmk_rgb_underglow_run_base_animation(void) {
-    // Run the base animation effect to fill pixels[] as background.
-    // Per-key colors will be overlaid on top (transparent keys keep this).
-    switch (state.base_effect) {
-    case UNDERGLOW_EFFECT_SOLID:
-        zmk_rgb_underglow_effect_solid();
-        break;
-    case UNDERGLOW_EFFECT_BREATHE:
-        zmk_rgb_underglow_effect_breathe();
-        break;
-    case UNDERGLOW_EFFECT_SPECTRUM:
-        zmk_rgb_underglow_effect_spectrum();
-        break;
-    case UNDERGLOW_EFFECT_SWIRL:
-        zmk_rgb_underglow_effect_swirl();
-        break;
-    default:
-        zmk_rgb_underglow_effect_solid();
-        break;
-    }
-}
-
+#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED) && !IS_ENABLED(CONFIG_ZMK_RGB_OVERLAY_ALWAYS)
+// Legacy mode: per-key RGB as a separate cyclable effect
 static void zmk_rgb_underglow_effect_layer(void) {
-    // First: run the base animation to fill pixels[] on all LEDs
-    zmk_rgb_underglow_run_base_animation();
-    // Then: overlay per-key colors from the underglow-layer.
-    // Keys with &trans (transparent) leave the base animation pixel untouched.
-    // Keys with &ug 0xRRGGBB override the pixel with the static color.
+    // Run whatever effect was active before switching to layer mode as background
+    switch (state.current_effect > 0 ? state.current_effect - 1 : UNDERGLOW_EFFECT_SOLID) {
+    case UNDERGLOW_EFFECT_SOLID: zmk_rgb_underglow_effect_solid(); break;
+    case UNDERGLOW_EFFECT_BREATHE: zmk_rgb_underglow_effect_breathe(); break;
+    case UNDERGLOW_EFFECT_SPECTRUM: zmk_rgb_underglow_effect_spectrum(); break;
+    case UNDERGLOW_EFFECT_SWIRL: zmk_rgb_underglow_effect_swirl(); break;
+    default: zmk_rgb_underglow_effect_solid(); break;
+    }
     zmk_rgb_underglow_apply_merged_rgbmap();
 }
-#endif // IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
+#endif
 
 static int zmk_led_generate_status(void);
 
@@ -497,12 +477,17 @@ static void zmk_rgb_underglow_tick(struct k_work *work) {
     case UNDERGLOW_EFFECT_SWIRL:
         zmk_rgb_underglow_effect_swirl();
         break;
-#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
+#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED) && !IS_ENABLED(CONFIG_ZMK_RGB_OVERLAY_ALWAYS)
     case UNDERGLOW_EFFECT_LAYER_INDICATORS:
         zmk_rgb_underglow_effect_layer();
         break;
 #endif
     }
+
+    // Always-overlay mode: per-key colors applied after every effect
+#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED) && IS_ENABLED(CONFIG_ZMK_RGB_OVERLAY_ALWAYS)
+    zmk_rgb_underglow_apply_merged_rgbmap();
+#endif
 
     zmk_led_write_pixels();
 }
@@ -533,10 +518,7 @@ static int rgb_settings_set(const char *name, size_t len, settings_read_cb read_
         if (rc >= 0) {
             if (state.on) {
 #if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
-                if (state.layer_enabled) {
-                    zmk_rgb_underglow_transient_on();
-                    zmk_rgb_underglow_set_layer(rgb_underglow_top_layer(), true);
-                }
+                k_timer_start(&underglow_tick, K_NO_WAIT, K_MSEC(50));
 #else
                 k_timer_start(&underglow_tick, K_NO_WAIT, K_MSEC(50));
 #endif
@@ -579,7 +561,6 @@ static int zmk_rgb_underglow_init(void) {
         current_effect : CONFIG_ZMK_RGB_UNDERGLOW_EFF_START,
         animation_step : 0,
         on : IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_ON_START),
-        layer_enabled : false
     };
 
 #if IS_ENABLED(CONFIG_SETTINGS)
@@ -593,11 +574,6 @@ static int zmk_rgb_underglow_init(void) {
     if (state.on) {
         k_timer_start(&underglow_tick, K_NO_WAIT, K_MSEC(25));
     }
-#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
-    if (state.layer_enabled) {
-        zmk_rgb_underglow_set_layer(rgb_underglow_top_layer(), true);
-    }
-#endif
     return 0;
 }
 
@@ -614,7 +590,7 @@ int zmk_rgb_underglow_get_state(bool *on_off) {
     if (!led_strip)
         return -ENODEV;
 
-    *on_off = state.on || state.layer_enabled;
+    *on_off = state.on;
     return 0;
 }
 
@@ -654,11 +630,6 @@ void zmk_rgb_set_ext_power(void) {
 }
 
 int zmk_rgb_underglow_on(void) {
-#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
-    if (state.current_effect == UNDERGLOW_EFFECT_LAYER_INDICATORS) {
-        state.layer_enabled = true;
-    }
-#endif
     zmk_rgb_underglow_transient_on();
     return zmk_rgb_underglow_save_state();
 }
@@ -670,10 +641,8 @@ int zmk_rgb_underglow_transient_on(void) {
     state.on = true;
     zmk_rgb_set_ext_power();
 
-    if (!state.layer_enabled) {
-        state.animation_step = 0;
-        k_timer_start(&underglow_tick, K_NO_WAIT, K_MSEC(25));
-    }
+    state.animation_step = 0;
+    k_timer_start(&underglow_tick, K_NO_WAIT, K_MSEC(25));
     return 0;
 }
 
@@ -689,7 +658,6 @@ K_WORK_DEFINE(underglow_off_work, zmk_rgb_underglow_off_handler);
 
 int zmk_rgb_underglow_off(void) {
     zmk_rgb_underglow_transient_off();
-    state.layer_enabled = false;
     return zmk_rgb_underglow_save_state();
 }
 
@@ -719,17 +687,8 @@ int zmk_rgb_underglow_select_effect(int effect) {
     }
 
     // When entering layer mode, remember the current animation as the base
-    // so it can run underneath per-key static colors (transparent keys show it)
-#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
-    if (effect == UNDERGLOW_EFFECT_LAYER_INDICATORS && state.current_effect != UNDERGLOW_EFFECT_LAYER_INDICATORS) {
-        state.base_effect = state.current_effect;
-    }
-#endif
     state.current_effect = effect;
     state.animation_step = 0;
-#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
-    state.layer_enabled = (effect == UNDERGLOW_EFFECT_LAYER_INDICATORS);
-#endif
     return zmk_rgb_underglow_save_state();
 }
 
@@ -902,34 +861,13 @@ static int zmk_rgb_underglow_apply_rgbmap(const struct zmk_behavior_binding *bin
 }
 
 static void zmk_rgb_underglow_set_layer(uint8_t layer, bool wakeup) {
-    LOG_DBG("state.layer: %d state.on: %d", state.layer_enabled, state.on);
-    if (!state.layer_enabled)
-        return;
-
-    // Run base animation to fill pixels, then overlay per-key colors.
-    // This gives the initial frame with both animation + static colors.
-    zmk_rgb_underglow_run_base_animation();
-    int has_pixels = zmk_rgb_underglow_apply_merged_rgbmap();
-
-    if (has_pixels) {
-        if (!state.on) {
-            if (!wakeup) {
-                LOG_DBG("rgb off and no wakeup, abort refresh");
-                return;
-            }
-            zmk_rgb_underglow_transient_on();
-        }
-        // Keep the tick timer running so the base animation continues
-        // cycling on transparent keys. The effect_layer tick handler
-        // will re-run base animation + overlay on every frame.
-        if (!k_timer_remaining_get(&underglow_tick)) {
-            k_timer_start(&underglow_tick, K_MSEC(50), K_MSEC(50));
-        }
-        LOG_DBG("write pixels");
+    // Layer changed — the tick handler will apply the new overlay on the next frame.
+    // Just trigger a refresh if RGB is on, or wake up if requested.
+    LOG_DBG("layer changed to %d, on: %d, wakeup: %d", layer, state.on, wakeup);
+    if (state.on) {
         zmk_led_write_pixels();
-    } else {
-        if (state.on)
-            zmk_rgb_underglow_transient_off();
+    } else if (wakeup) {
+        zmk_rgb_underglow_transient_on();
     }
 }
 #endif /* IS_ENABLED(UNDERGLOW_LAYER_ENABLED) */
@@ -1082,12 +1020,6 @@ static int rgb_underglow_auto_state(bool target_wake_state) {
     sleep_state.is_awake = target_wake_state;
 
     if (sleep_state.is_awake) {
-#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
-        if (state.layer_enabled) {
-            zmk_rgb_underglow_set_layer(rgb_underglow_top_layer(), true);
-            return 0;
-        }
-#endif
         if (sleep_state.rgb_state_before_sleeping) {
             return zmk_rgb_underglow_transient_on();
         } else {

@@ -349,6 +349,17 @@ config EXPERIMENTAL_RGB_LAYER
     bool "Experimental per-key per-layer RGB underglow"
     default n
 
+config ZMK_RGB_OVERLAY_ALWAYS
+    bool "Per-key RGB always overlays on stock animations"
+    depends on EXPERIMENTAL_RGB_LAYER
+    default y
+    help
+      When enabled, per-key RGB colors are permanently overlaid on top of
+      whatever stock animation is running (solid, breathe, spectrum, swirl).
+      Pinned keys stay fixed regardless of effect cycling.
+      When disabled, per-key RGB is a separate effect mode that must be
+      cycled to via RGB_EFF (legacy layer-effect behavior).
+
 endif # ZMK_RGB_UNDERGLOW
 
 menuconfig ZMK_BACKLIGHT
