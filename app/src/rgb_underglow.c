@@ -39,6 +39,7 @@
 
 #include <zmk/workqueue.h>
 #include <zmk/events/split_peripheral_layer_changed.h>
+#include <zmk/events/layer_state_changed.h>
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
 #include <zmk/split/central.h>
@@ -870,7 +871,12 @@ static void zmk_rgb_underglow_set_layer(uint8_t layer, bool wakeup) {
     if (!state.layer_enabled)
         return;
 
-    if (zmk_rgb_underglow_apply_merged_rgbmap()) {
+    // Run base animation to fill pixels, then overlay per-key colors.
+    // This gives the initial frame with both animation + static colors.
+    zmk_rgb_underglow_run_base_animation();
+    int has_pixels = zmk_rgb_underglow_apply_merged_rgbmap();
+
+    if (has_pixels) {
         if (!state.on) {
             if (!wakeup) {
                 LOG_DBG("rgb off and no wakeup, abort refresh");
@@ -878,11 +884,11 @@ static void zmk_rgb_underglow_set_layer(uint8_t layer, bool wakeup) {
             }
             zmk_rgb_underglow_transient_on();
         }
-        k_timer_stop(&underglow_tick);
-        state.animation_step = 0;
-        int fade_delay = zmk_rgbmap_fade_delay(layer);
-        if (fade_delay >= 0) {
-            k_timer_start(&underglow_tick, K_SECONDS(fade_delay), K_MSEC(50));
+        // Keep the tick timer running so the base animation continues
+        // cycling on transparent keys. The effect_layer tick handler
+        // will re-run base animation + overlay on every frame.
+        if (!k_timer_remaining_get(&underglow_tick)) {
+            k_timer_start(&underglow_tick, K_MSEC(50), K_MSEC(50));
         }
         LOG_DBG("write pixels");
         zmk_led_write_pixels();
@@ -1067,6 +1073,12 @@ static int rgb_underglow_event_listener(const zmk_event_t *eh) {
 #endif
 
 #if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
+    if (as_zmk_layer_state_changed(eh)) {
+        uint8_t layer = rgb_underglow_top_layer();
+        LOG_DBG("zmk_layer_state_changed, top layer: %d", layer);
+        zmk_rgb_underglow_set_layer(layer, true);
+        return 0;
+    }
     if (as_zmk_split_peripheral_layer_changed(eh)) {
         const struct zmk_split_peripheral_layer_changed *ev =
             as_zmk_split_peripheral_layer_changed(eh);
@@ -1113,6 +1125,7 @@ ZMK_SUBSCRIPTION(rgb_underglow, zmk_usb_conn_state_changed);
 #endif
 
 #if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
+ZMK_SUBSCRIPTION(rgb_underglow, zmk_layer_state_changed);
 ZMK_SUBSCRIPTION(rgb_underglow, zmk_split_peripheral_layer_changed);
 ZMK_SUBSCRIPTION(rgb_underglow, zmk_underglow_color_changed);
 #endif
