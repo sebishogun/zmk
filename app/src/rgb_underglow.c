@@ -621,7 +621,9 @@ static int zmk_rgb_underglow_apply_merged_rgbmap(void) {
     int rc = 0;
     size_t len = 0;
     uint8_t active_layers[ZMK_KEYMAP_LAYERS_LEN];
-    uint32_t layer_state = zmk_keymap_layer_state();
+    /* zmk_keymap_layer_state() only exists on the split central. On the
+     * peripheral we fall back to the mirrored state replicated from central. */
+    uint32_t layer_state = rgb_underglow_layers_state();
 
     for (uint8_t layer = ZMK_KEYMAP_LAYERS_LEN - 1; layer > 0; layer--) {
         if ((layer_state & (BIT(layer))) == (BIT(layer))) {
