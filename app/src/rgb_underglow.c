@@ -65,6 +65,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #if DT_HAS_COMPAT_STATUS_OKAY(zmk_underglow_layer) && IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
 #define UNDERGLOW_LAYER_ENABLED 1
 static int zmk_rgb_underglow_apply_merged_rgbmap(void);
+static void zmk_rgb_underglow_set_layer(uint8_t layer, bool wakeup);
 #endif
 
 #define HUE_MAX 360
