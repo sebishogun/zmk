@@ -5,7 +5,25 @@
  */
 
 #pragma once
+#include <stdbool.h>
+#include <stdint.h>
 #include <zmk/keymap.h>
+
+/* Live per-key colour overlay edited via the rgb Studio subsystem. Values are
+ * packed 0xEERRGGBB. layer_id is the Studio-side persistent layer id. */
+int  zmk_rgb_underglow_layer_stage_set(uint32_t layer_id, uint32_t key_pos, uint32_t color);
+int  zmk_rgb_underglow_layer_set_transparent(uint32_t layer_id, bool transparent);
+int  zmk_rgb_underglow_layer_get_color(uint32_t layer_id, uint32_t key_pos, uint32_t *out);
+bool zmk_rgb_underglow_layer_is_transparent(uint32_t layer_id);
+void zmk_rgb_underglow_layer_clear(uint32_t layer_id);
+int  zmk_rgb_underglow_layer_save(void);
+void zmk_rgb_underglow_layer_discard(void);
+void zmk_rgb_underglow_layer_reset_all(void);
+
+/* Render-path hooks (called from rgb_underglow.c). layer_index is a runtime
+ * keymap layer index, *not* the persistent layer_id. */
+bool zmk_rgb_underglow_studio_lookup(uint8_t layer_index, uint32_t key_pos, uint32_t *out);
+bool zmk_rgb_underglow_studio_layer_transparent(uint8_t layer_index);
 
 #define ZMK_RGB_CHILD_LEN_PLUS_ONE(node) 1 +
 

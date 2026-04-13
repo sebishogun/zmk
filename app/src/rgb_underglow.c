@@ -599,6 +599,20 @@ static int zmk_rgb_underglow_apply_merged_rgbmap(void) {
 
         if (midx < ZMK_KEYMAP_LEN) {
             for (int layer = 0; layer < len; layer++) {
+                /* Live overlay edited via Studio rgb subsystem wins over the
+                 * DT-defined binding chain — but only when the layer isn't
+                 * marked transparent. */
+                uint32_t live_color;
+                if (zmk_rgb_underglow_studio_lookup(active_layers[layer], midx, &live_color)) {
+                    color = (int)live_color;
+                    if (((color >> 24) & 0xFF) == 0xFF) {
+                        color = 0;
+                        continue;
+                    }
+                    is_transparent = false;
+                    break;
+                }
+
                 const struct zmk_behavior_binding *bindings =
                     rgb_underglow_get_bindings(active_layers[layer]);
                 if (bindings != NULL) {
