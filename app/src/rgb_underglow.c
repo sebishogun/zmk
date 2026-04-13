@@ -49,6 +49,10 @@
 #include <zmk/keymap.h>
 #include <zmk/behavior.h>
 #include <drivers/behavior.h>
+#if !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+#include <zmk/split/peripheral_layers.h>
+#include <zmk/events/split_peripheral_layer_changed.h>
+#endif
 #endif
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
@@ -584,10 +588,22 @@ static int rgb_underglow_event_listener(const zmk_event_t *eh) {
 #endif
 
 #if IS_ENABLED(UNDERGLOW_LAYER_ENABLED) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    /* layer_state_changed is only raised on the central half. Peripheral
-     * receives layer state via the split comms path (handled elsewhere). */
+    /* Central: local layer state changed, apply overlay + forward to peripheral
+     * via the split-bt writer subscribed in central.c. */
     if (as_zmk_layer_state_changed(eh)) {
         uint8_t layer = zmk_keymap_highest_layer_active();
+        zmk_rgb_underglow_set_layer(layer, true);
+        return 0;
+    }
+#endif
+#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+    /* Peripheral: receives the active-layer bitmap over split-bt, mirrors it
+     * locally so the same per-key overlay applies here. */
+    const struct zmk_split_peripheral_layer_changed *layer_ev =
+        as_zmk_split_peripheral_layer_changed(eh);
+    if (layer_ev) {
+        set_peripheral_layers_state(layer_ev->layers);
+        uint8_t layer = peripheral_highest_layer_active();
         zmk_rgb_underglow_set_layer(layer, true);
         return 0;
     }
@@ -608,10 +624,10 @@ ZMK_SUBSCRIPTION(rgb_underglow, zmk_usb_conn_state_changed);
 #endif
 
 #if IS_ENABLED(UNDERGLOW_LAYER_ENABLED) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-/* zmk_layer_state_changed only exists on the split central. Peripheral gets
- * its layer state via the split transport callback that writes into
- * peripheral_layers_state(). */
 ZMK_SUBSCRIPTION(rgb_underglow, zmk_layer_state_changed);
+#endif
+#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+ZMK_SUBSCRIPTION(rgb_underglow, zmk_split_peripheral_layer_changed);
 #endif
 
 #if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)

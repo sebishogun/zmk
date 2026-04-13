@@ -33,6 +33,10 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/pointing/input_split.h>
 #include <zmk/hid_indicators_types.h>
 #include <zmk/physical_layouts.h>
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+#include <zmk/keymap.h>
+#include <zmk/events/layer_state_changed.h>
+#endif
 
 static int start_scanning(void);
 
@@ -59,6 +63,9 @@ struct peripheral_slot {
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
     uint16_t update_hid_indicators;
 #endif // IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+    uint16_t update_layers_handle;
+#endif
     uint16_t selected_physical_layout_handle;
     uint8_t position_state[POSITION_STATE_DATA_LEN];
     uint8_t changed_positions[POSITION_STATE_DATA_LEN];
@@ -219,6 +226,9 @@ int release_peripheral_slot(int index) {
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
     slot->update_hid_indicators = 0;
 #endif // IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+    slot->update_layers_handle = 0;
+#endif
 
     return 0;
 }
@@ -620,6 +630,12 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
             LOG_DBG("Found update HID indicators handle");
             slot->update_hid_indicators = bt_gatt_attr_value_handle(attr);
 #endif // IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+        } else if (!bt_uuid_cmp(((struct bt_gatt_chrc *)attr->user_data)->uuid,
+                                BT_UUID_DECLARE_128(ZMK_SPLIT_BT_UPDATE_LAYERS_UUID))) {
+            LOG_DBG("Found update Layers handle");
+            slot->update_layers_handle = bt_gatt_attr_value_handle(attr);
+#endif
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
         } else if (!bt_uuid_cmp(((struct bt_gatt_chrc *)attr->user_data)->uuid,
                                 BT_UUID_BAS_BATTERY_LEVEL)) {
@@ -1157,15 +1173,45 @@ static int zmk_split_bt_central_init(void) {
 
 SYS_INIT(zmk_split_bt_central_init, APPLICATION, CONFIG_ZMK_BLE_INIT_PRIORITY);
 
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+static uint32_t layers_for_peripheral = 0;
+
+static void split_central_update_layers_callback(struct k_work *work) {
+    uint32_t layers = layers_for_peripheral;
+    for (int i = 0; i < CONFIG_ZMK_SPLIT_BLE_CENTRAL_PERIPHERALS; i++) {
+        if (peripherals[i].state != PERIPHERAL_SLOT_STATE_CONNECTED)
+            continue;
+        if (peripherals[i].update_layers_handle == 0)
+            continue;
+        int err =
+            bt_gatt_write_without_response(peripherals[i].conn, peripherals[i].update_layers_handle,
+                                           &layers, sizeof(layers), true);
+        if (err) {
+            LOG_ERR("Failed to send layers to peripheral (err %d)", err);
+        }
+    }
+}
+static K_WORK_DEFINE(split_central_update_layers_work, split_central_update_layers_callback);
+#endif
+
 static int zmk_split_bt_central_listener_cb(const zmk_event_t *eh) {
     if (as_zmk_physical_layout_selection_changed(eh)) {
         k_work_submit(&update_peripherals_selected_layouts_work);
     }
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+    if (as_zmk_layer_state_changed(eh)) {
+        layers_for_peripheral = zmk_keymap_layer_state();
+        k_work_submit_to_queue(&split_central_split_run_q, &split_central_update_layers_work);
+    }
+#endif
     return ZMK_EV_EVENT_BUBBLE;
 }
 
 ZMK_LISTENER(zmk_split_bt_central, zmk_split_bt_central_listener_cb);
 ZMK_SUBSCRIPTION(zmk_split_bt_central, zmk_physical_layout_selection_changed);
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+ZMK_SUBSCRIPTION(zmk_split_bt_central, zmk_layer_state_changed);
+#endif
 
 static int split_central_bt_send_command(uint8_t source,
                                          struct zmk_split_transport_central_command cmd) {

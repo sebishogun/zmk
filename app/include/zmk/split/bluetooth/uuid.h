@@ -20,3 +20,6 @@
 #define ZMK_SPLIT_BT_UPDATE_HID_INDICATORS_UUID ZMK_BT_SPLIT_UUID(0x00000004)
 #define ZMK_SPLIT_BT_SELECT_PHYS_LAYOUT_UUID ZMK_BT_SPLIT_UUID(0x00000005)
 #define ZMK_SPLIT_BT_INPUT_EVENT_UUID ZMK_BT_SPLIT_UUID(0x00000006)
+/* AuroraKey: used by central to push the active-layer bitmap to peripheral so
+ * per-key RGB overlay knows which layer is active. Write-without-response. */
+#define ZMK_SPLIT_BT_UPDATE_LAYERS_UUID ZMK_BT_SPLIT_UUID(0x00000007)
