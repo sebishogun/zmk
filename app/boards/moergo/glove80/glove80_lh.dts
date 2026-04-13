@@ -15,8 +15,36 @@
 
     chosen {
         zmk,underglow = &led_strip;
+        zmk,underglow-indicators = &underglow_indicators;
         zmk,backlight = &back_led_backlight;
         zmk,battery   = &vbatt;
+    };
+
+    /* Default LH LED positions for the RGB_STATUS popup.
+     * Matches MoErgo/darknao canonical Glove80 layout. The LED strip
+     * is indexed 0-39 and physically arranged as:
+     *   34 28 22 16 10  5
+     *   35 29 23 17 11  6
+     *   36 30 24 18 12  7
+     *   37 31 25 19 13  8
+     *   38 32 26 20 14  9
+     *   39 33 27 21 15
+     *                 0  1  2
+     *                 3  4  5
+     * AuroraKey may emit a DT overlay at build time to override these
+     * per-workspace (see internal/build/generate.go).
+     */
+    underglow_indicators: underglow-indicators {
+        compatible     = "zmk,underglow-indicators";
+        layer-state    = <35 29 23 17 11 6>;
+        bat-lhs        = <36 30 24 18 12 7>;
+        bat-rhs        = <37 31 25 19 13 8>;
+        capslock       = <22>;
+        numlock        = <16>;
+        scrolllock     = <10>;
+        ble-state      = <3 4 0 1>;
+        usb-state      = <5>;
+        output-fallback = <15>;
     };
 
     back_led_backlight: pwmleds {

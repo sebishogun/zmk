@@ -1,7 +1,7 @@
 # Copyright (c) 2020, The ZMK Contributors
 # SPDX-License-Identifier: MIT
 
-description: Underglow indicators
+description: Underglow indicators (battery, HID locks, layer, BLE, USB).
 
 compatible: "zmk,underglow-indicators"
 
@@ -9,9 +9,11 @@ properties:
   bat-lhs:
     type: array
     required: true
+    description: Physical LED indices dedicated to the LH battery bar.
   bat-rhs:
     type: array
     required: true
+    description: Physical LED indices dedicated to the RH battery bar.
   capslock:
     type: int
     required: true
@@ -24,9 +26,11 @@ properties:
   layer-state:
     type: array
     required: true
+    description: LED index per active-layer slot (index 0 = layer 0, etc.).
   ble-state:
     type: array
     required: true
+    description: LED index per BLE profile slot.
   usb-state:
     type: int
     required: true

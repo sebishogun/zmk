@@ -32,10 +32,18 @@ zmk_studio_Response set_key_color(const zmk_studio_Request *req) {
     int ret = zmk_rgb_underglow_layer_stage_set(r->layer_id, r->key_position, r->color);
     zmk_rgb_SetKeyColorResponse resp;
     switch (ret) {
-    case 0:        resp = zmk_rgb_SetKeyColorResponse_SET_KEY_COLOR_RESP_OK; break;
-    case -EINVAL:  resp = zmk_rgb_SetKeyColorResponse_SET_KEY_COLOR_RESP_INVALID_LAYER; break;
-    case -ERANGE:  resp = zmk_rgb_SetKeyColorResponse_SET_KEY_COLOR_RESP_INVALID_KEY; break;
-    default:       resp = zmk_rgb_SetKeyColorResponse_SET_KEY_COLOR_RESP_NO_SPACE; break;
+    case 0:
+        resp = zmk_rgb_SetKeyColorResponse_SET_KEY_COLOR_RESP_OK;
+        break;
+    case -EINVAL:
+        resp = zmk_rgb_SetKeyColorResponse_SET_KEY_COLOR_RESP_INVALID_LAYER;
+        break;
+    case -ERANGE:
+        resp = zmk_rgb_SetKeyColorResponse_SET_KEY_COLOR_RESP_INVALID_KEY;
+        break;
+    default:
+        resp = zmk_rgb_SetKeyColorResponse_SET_KEY_COLOR_RESP_NO_SPACE;
+        break;
     }
     return RGB_RESPONSE(set_key_color, resp);
 }
@@ -45,9 +53,8 @@ zmk_studio_Response set_layer_transparent(const zmk_studio_Request *req) {
         &req->subsystem.rgb.request_type.set_layer_transparent;
     int ret = zmk_rgb_underglow_layer_set_transparent(r->layer_id, r->transparent);
     zmk_rgb_SetLayerTransparentResponse resp =
-        ret == 0
-            ? zmk_rgb_SetLayerTransparentResponse_SET_LAYER_TRANSPARENT_RESP_OK
-            : zmk_rgb_SetLayerTransparentResponse_SET_LAYER_TRANSPARENT_RESP_INVALID_LAYER;
+        ret == 0 ? zmk_rgb_SetLayerTransparentResponse_SET_LAYER_TRANSPARENT_RESP_OK
+                 : zmk_rgb_SetLayerTransparentResponse_SET_LAYER_TRANSPARENT_RESP_INVALID_LAYER;
     return RGB_RESPONSE(set_layer_transparent, resp);
 }
 
@@ -56,10 +63,13 @@ static bool encode_layer_colors_keys(pb_ostream_t *stream, const pb_field_t *fie
     uint32_t layer_id = (uint32_t)(uintptr_t)*arg;
     for (uint32_t pos = 0; pos < ZMK_KEYMAP_LEN; pos++) {
         uint32_t color;
-        if (zmk_rgb_underglow_layer_get_color(layer_id, pos, &color) != 0) continue;
-        if (!pb_encode_tag_for_field(stream, field)) return false;
+        if (zmk_rgb_underglow_layer_get_color(layer_id, pos, &color) != 0)
+            continue;
+        if (!pb_encode_tag_for_field(stream, field))
+            return false;
         zmk_rgb_KeyColor entry = {.key_position = pos, .color = color};
-        if (!pb_encode_submessage(stream, &zmk_rgb_KeyColor_msg, &entry)) return false;
+        if (!pb_encode_submessage(stream, &zmk_rgb_KeyColor_msg, &entry))
+            return false;
     }
     return true;
 }

@@ -26,6 +26,22 @@
 #include <zmk/events/usb_conn_state_changed.h>
 #include <zmk/events/layer_state_changed.h>
 #include <zmk/workqueue.h>
+#include <zmk/endpoints.h>
+#include <zmk/hid_indicators_types.h>
+#include <zmk/hid_indicators.h>
+#include <dt-bindings/zmk/hid_indicators.h>
+#include <zmk/keymap.h>
+
+#if IS_ENABLED(CONFIG_ZMK_BATTERY_REPORTING)
+#include <zmk/battery.h>
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
+#include <zmk/split/central.h>
+#endif
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_BLE)
+#include <zmk/ble.h>
+#endif
 
 #if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
 #include <zmk/rgb_underglow_layer.h>
@@ -65,7 +81,7 @@ enum rgb_underglow_effect {
 #if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
     UNDERGLOW_EFFECT_PER_KEY_ONLY, // Per-key colors only, no background
 #endif
-    UNDERGLOW_EFFECT_OFF,          // All LEDs off
+    UNDERGLOW_EFFECT_OFF, // All LEDs off
     UNDERGLOW_EFFECT_NUMBER
 };
 
@@ -75,11 +91,22 @@ struct rgb_underglow_state {
     uint8_t current_effect;
     uint16_t animation_step;
     bool on;
+    /* RGB_STATUS popup — tap-Magic indicator (battery/HID/BLE/USB/layer).
+     * status_active gates whether the status_pixels buffer is composited
+     * over the regular animation frame. animation_step is in 25 ms ticks:
+     *   0..20   = fade-in (500 ms)
+     *   20..320 = full status (~8 s)
+     *   320..400 = fade-out (2 s)
+     *   >400    = off
+     */
+    bool status_active;
+    uint16_t status_animation_step;
 };
 
 static const struct device *led_strip;
 
 static struct led_rgb pixels[STRIP_NUM_PIXELS];
+static struct led_rgb status_pixels[STRIP_NUM_PIXELS];
 
 static struct rgb_underglow_state state;
 
@@ -222,6 +249,20 @@ static void zmk_rgb_underglow_tick(struct k_work *work) {
         zmk_rgb_underglow_apply_merged_rgbmap();
     }
 #endif
+
+    // RGB_STATUS popup: blend status_pixels over whatever we just composited.
+    // Defined further down; no-op on RH half or when status_active is false.
+    extern int16_t zmk_rgb_underglow_status_blend(void);
+    int16_t blend = zmk_rgb_underglow_status_blend();
+    if (blend > 0) {
+        int16_t blend_l = blend;
+        int16_t blend_r = 256 - blend;
+        for (int i = 0; i < STRIP_NUM_PIXELS; i++) {
+            pixels[i].r = ((status_pixels[i].r * blend_l) >> 8) + ((pixels[i].r * blend_r) >> 8);
+            pixels[i].g = ((status_pixels[i].g * blend_l) >> 8) + ((pixels[i].g * blend_r) >> 8);
+            pixels[i].b = ((status_pixels[i].b * blend_l) >> 8) + ((pixels[i].b * blend_r) >> 8);
+        }
+    }
 
     int err = led_strip_update_rgb(led_strip, pixels, STRIP_NUM_PIXELS);
     if (err < 0) {
@@ -493,8 +534,7 @@ int zmk_rgb_underglow_change_spd(int direction) {
 }
 
 #if IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_AUTO_OFF_IDLE) ||                                          \
-    IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_AUTO_OFF_USB) ||                                           \
-    IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
+    IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_AUTO_OFF_USB) || IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
 struct rgb_underglow_sleep_state {
     bool is_awake;
     bool rgb_state_before_sleeping;
@@ -622,11 +662,10 @@ static int zmk_rgb_underglow_apply_merged_rgbmap(void) {
                         const struct behavior_driver_api *api =
                             (const struct behavior_driver_api *)dev->api;
                         if (api->binding_pressed != NULL) {
-                            struct zmk_behavior_binding_event event = {
-                                .position = midx,
-                                .layer = active_layers[layer],
-                                .timestamp = k_uptime_get()
-                            };
+                            struct zmk_behavior_binding_event event = {.position = midx,
+                                                                       .layer =
+                                                                           active_layers[layer],
+                                                                       .timestamp = k_uptime_get()};
                             color = api->binding_pressed(
                                 (struct zmk_behavior_binding *)&bindings[midx], event);
                             if (color == ZMK_BEHAVIOR_TRANSPARENT) {
@@ -648,8 +687,8 @@ static int zmk_rgb_underglow_apply_merged_rgbmap(void) {
             // Extract per-key effect from upper 8 bits, RGB from lower 24
             int effect_mode = (color >> 24) & 0xFF;
             int rgb_color = color & 0xFFFFFF;
-            struct led_rgb pixel_color = hex_to_rgb(
-                (rgb_color >> 16) & 0xFF, (rgb_color >> 8) & 0xFF, rgb_color & 0xFF);
+            struct led_rgb pixel_color =
+                hex_to_rgb((rgb_color >> 16) & 0xFF, (rgb_color >> 8) & 0xFF, rgb_color & 0xFF);
 
             switch (effect_mode) {
             case 1: { // breathe
@@ -699,5 +738,204 @@ static void zmk_rgb_underglow_set_layer(uint8_t layer, bool wakeup) {
 }
 
 #endif /* IS_ENABLED(UNDERGLOW_LAYER_ENABLED) */
+
+/* ── RGB_STATUS indicators (ported from moergo-sc/darknao Glove80 forks) ──
+ *
+ * When the Magic key is tapped, the `&rgb_ug RGB_STATUS` binding calls
+ * zmk_rgb_underglow_status(). That kicks off a 10 s popup on the LEDs that
+ * shows:
+ *   - LH battery level (green/yellow/red bar)
+ *   - RH battery level (fetched from peripheral over BLE split, red bar if
+ *     disconnected)
+ *   - Caps/Num/Scroll lock state (red pixels where set)
+ *   - Active layer (magenta)
+ *   - BLE profile state (white=active, green=connected, red=paired,
+ *     lilac=unused)
+ *   - USB HID state (white=active, green=connected, red=powered-only,
+ *     lilac=disconnected)
+ *   - Output transport fallback (red = preferred transport inactive)
+ *
+ * The popup is only rendered on the half that has the `underglow_indicators`
+ * DT node (typically the LH central). On the peripheral half the status
+ * path compiles to a no-op.
+ */
+#define UNDERGLOW_INDICATORS DT_PATH(underglow_indicators)
+
+#if DT_NODE_HAS_STATUS(UNDERGLOW_INDICATORS, okay)
+
+#define UNDERGLOW_INDICATORS_ENABLED 1
+
+static const uint8_t underglow_layer_state[] = DT_PROP(UNDERGLOW_INDICATORS, layer_state);
+static const uint8_t underglow_ble_state[] = DT_PROP(UNDERGLOW_INDICATORS, ble_state);
+static const uint8_t underglow_bat_lhs[] = DT_PROP(UNDERGLOW_INDICATORS, bat_lhs);
+static const uint8_t underglow_bat_rhs[] = DT_PROP(UNDERGLOW_INDICATORS, bat_rhs);
+
+#define STATUS_RGB(R, G, B)                                                                        \
+    ((struct led_rgb){                                                                             \
+        r : (CONFIG_ZMK_RGB_UNDERGLOW_BRT_MAX * (R)) / 0xff,                                       \
+        g : (CONFIG_ZMK_RGB_UNDERGLOW_BRT_MAX * (G)) / 0xff,                                       \
+        b : (CONFIG_ZMK_RGB_UNDERGLOW_BRT_MAX * (B)) / 0xff                                        \
+    })
+
+static const struct led_rgb status_red = STATUS_RGB(0xff, 0x00, 0x00);
+static const struct led_rgb status_yellow = STATUS_RGB(0xff, 0xff, 0x00);
+static const struct led_rgb status_green = STATUS_RGB(0x00, 0xff, 0x00);
+static const struct led_rgb status_dull_green = STATUS_RGB(0x00, 0xff, 0x68);
+static const struct led_rgb status_magenta = STATUS_RGB(0xff, 0x00, 0xff);
+static const struct led_rgb status_white = STATUS_RGB(0xff, 0xff, 0xff);
+static const struct led_rgb status_lilac = STATUS_RGB(0x6b, 0x1f, 0xce);
+
+static void status_battery_bar(int bat_level, const uint8_t *addresses, size_t len) {
+    struct led_rgb color = (bat_level > 40)   ? status_green
+                           : (bat_level > 20) ? status_yellow
+                                              : status_red;
+    for (size_t i = 0; i < len; i++) {
+        int min_level = (i * 100) / (len - 1);
+        if (bat_level >= min_level) {
+            status_pixels[addresses[i]] = color;
+        }
+    }
+}
+
+static void status_fill(struct led_rgb color, const uint8_t *addresses, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        status_pixels[addresses[i]] = color;
+    }
+}
+
+static int16_t zmk_rgb_underglow_generate_status(void) {
+    for (int i = 0; i < STRIP_NUM_PIXELS; i++) {
+        status_pixels[i] = (struct led_rgb){0};
+    }
+
+#if IS_ENABLED(CONFIG_ZMK_BATTERY_REPORTING)
+    status_battery_bar(zmk_battery_state_of_charge(), underglow_bat_lhs,
+                       DT_PROP_LEN(UNDERGLOW_INDICATORS, bat_lhs));
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
+    uint8_t peripheral_level = 0;
+    int rc = zmk_split_central_get_peripheral_battery_level(0, &peripheral_level);
+    if (rc == 0) {
+        status_battery_bar(peripheral_level, underglow_bat_rhs,
+                           DT_PROP_LEN(UNDERGLOW_INDICATORS, bat_rhs));
+    } else if (rc == -ENODEV || rc == -ENOTCONN) {
+        status_fill(status_red, underglow_bat_rhs, DT_PROP_LEN(UNDERGLOW_INDICATORS, bat_rhs));
+    }
+#endif
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_HID_INDICATORS)
+    zmk_hid_indicators_t led_flags = zmk_hid_indicators_get_current_profile();
+    if (led_flags & HID_INDICATOR_CAPS_LOCK)
+        status_pixels[DT_PROP(UNDERGLOW_INDICATORS, capslock)] = status_red;
+    if (led_flags & HID_INDICATOR_NUM_LOCK)
+        status_pixels[DT_PROP(UNDERGLOW_INDICATORS, numlock)] = status_red;
+    if (led_flags & HID_INDICATOR_SCROLL_LOCK)
+        status_pixels[DT_PROP(UNDERGLOW_INDICATORS, scrolllock)] = status_red;
+#endif
+
+    for (uint8_t i = 0; i < DT_PROP_LEN(UNDERGLOW_INDICATORS, layer_state); i++) {
+        if (zmk_keymap_layer_active(i))
+            status_pixels[underglow_layer_state[i]] = status_magenta;
+    }
+
+    struct zmk_endpoint_instance active_endpoint = zmk_endpoint_get_selected();
+    if (zmk_endpoint_get_preferred_transport() != active_endpoint.transport)
+        status_pixels[DT_PROP(UNDERGLOW_INDICATORS, output_fallback)] = status_red;
+
+#if IS_ENABLED(CONFIG_ZMK_BLE)
+    int active_ble = zmk_ble_active_profile_index();
+    for (uint8_t i = 0;
+         i < MIN(ZMK_BLE_PROFILE_COUNT, DT_PROP_LEN(UNDERGLOW_INDICATORS, ble_state)); i++) {
+        // Upstream Z4.1 exposes per-index is_open/is_connected; derive darknao's
+        // 3-state status (0=unused, 1=paired, 2=connected) on the fly.
+        bool open = zmk_ble_profile_is_open(i);
+        bool connected = zmk_ble_profile_is_connected(i);
+        uint8_t px = underglow_ble_state[i];
+        if (connected && active_endpoint.transport == ZMK_TRANSPORT_BLE && active_ble == i) {
+            status_pixels[px] = status_white;
+        } else if (connected) {
+            status_pixels[px] = status_dull_green;
+        } else if (!open) {
+            status_pixels[px] = status_red; // paired but not connected
+        } else {
+            status_pixels[px] = status_lilac; // unused slot
+        }
+    }
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_USB)
+    enum zmk_usb_conn_state usb_state = zmk_usb_get_conn_state();
+    uint8_t usb_px = DT_PROP(UNDERGLOW_INDICATORS, usb_state);
+    if (usb_state == ZMK_USB_CONN_HID && active_endpoint.transport == ZMK_TRANSPORT_USB) {
+        status_pixels[usb_px] = status_white;
+    } else if (usb_state == ZMK_USB_CONN_HID) {
+        status_pixels[usb_px] = status_dull_green;
+    } else if (usb_state == ZMK_USB_CONN_POWERED) {
+        status_pixels[usb_px] = status_red;
+    } else if (usb_state == ZMK_USB_CONN_NONE) {
+        status_pixels[usb_px] = status_lilac;
+    }
+#endif
+
+    // 500 ms fade-in, ~8 s hold, 2 s fade-out. Step is 25 ms.
+    int16_t blend = 256;
+    if (state.status_animation_step < (500 / 25)) {
+        blend = (state.status_animation_step * 256) / (500 / 25);
+    } else if (state.status_animation_step > (8000 / 25)) {
+        blend = 256 - (((state.status_animation_step - (8000 / 25)) * 256) / (2000 / 25));
+    }
+    if (blend < 0)
+        blend = 0;
+    if (blend > 256)
+        blend = 256;
+    return blend;
+}
+
+int16_t zmk_rgb_underglow_status_blend(void) {
+    if (!state.status_active) {
+        return 0;
+    }
+    return zmk_rgb_underglow_generate_status();
+}
+
+static void zmk_rgb_underglow_status_update(struct k_timer *timer);
+K_TIMER_DEFINE(underglow_status_update_timer, zmk_rgb_underglow_status_update, NULL);
+
+static void zmk_rgb_underglow_status_update(struct k_timer *timer) {
+    if (!state.status_active)
+        return;
+    state.status_animation_step++;
+    if (state.status_animation_step > (10000 / 25)) {
+        state.status_active = false;
+        k_timer_stop(&underglow_status_update_timer);
+    }
+    if (!k_work_is_pending(&underglow_tick_work)) {
+        k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &underglow_tick_work);
+    }
+}
+
+int zmk_rgb_underglow_status(void) {
+    if (!state.status_active) {
+        state.status_animation_step = 0;
+    } else if (state.status_animation_step > (500 / 25)) {
+        // Retap while already fading out → snap back to full brightness.
+        state.status_animation_step = 500 / 25;
+    }
+    state.status_active = true;
+    // Ensure the tick loop is running so the blend gets composited.
+    if (!state.on) {
+        k_timer_start(&underglow_tick, K_NO_WAIT, K_MSEC(25));
+    }
+    k_timer_start(&underglow_status_update_timer, K_NO_WAIT, K_MSEC(25));
+    return 0;
+}
+
+#else /* UNDERGLOW_INDICATORS node not present (e.g. RH peripheral) */
+
+int16_t zmk_rgb_underglow_status_blend(void) { return 0; }
+
+int zmk_rgb_underglow_status(void) { return -ENOTSUP; }
+
+#endif /* DT_NODE_HAS_STATUS(UNDERGLOW_INDICATORS, okay) */
 
 SYS_INIT(zmk_rgb_underglow_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);

@@ -21,8 +21,8 @@ static int underglow_color_init(const struct device *dev) { return 0; };
 static int underglow_color_process(struct zmk_behavior_binding *binding,
                                    struct zmk_behavior_binding_event event) {
     // param1 encodes everything in 32 bits:
-    //   Upper 8 bits (0xFF000000): effect mode (0=static, 1=breathe, 2=pulse, 4=dim, 0xFF=transparent)
-    //   Lower 24 bits (0x00FFFFFF): RGB color
+    //   Upper 8 bits (0xFF000000): effect mode (0=static, 1=breathe, 2=pulse, 4=dim,
+    //   0xFF=transparent) Lower 24 bits (0x00FFFFFF): RGB color
     return (int)binding->param1;
 }
 

@@ -10,6 +10,7 @@ yet — it documents the patch set required to land the feature.
 
 1. **Fork `zmkfirmware/zmk-studio-messages`** to `sebishogun/zmk-studio-messages`,
    branch `aurorakey-rgb`.
+
    - Copy `proto/rgb.proto` and `proto/rgb.options.in` into `proto/zmk/`.
    - Patch `proto/zmk/studio.proto`:
      ```
@@ -28,15 +29,18 @@ yet — it documents the patch set required to land the feature.
    - Update CMake glob so nanopb generates `rgb.pb.[ch]`.
 
 2. **Pin the fork** in this repo's `app/west.yml`:
+
    ```yaml
    - name: zmk-studio-messages
      remote: sebishogun
      revision: aurorakey-rgb
      path: modules/msgs/zmk-studio-messages
    ```
+
    Add `sebishogun` to `remotes:` if not already there.
 
 3. **Wire the subsystem source**:
+
    - Move `src/rgb_subsystem.c` into `app/src/studio/rgb_subsystem.c`.
    - Add to `app/src/studio/CMakeLists.txt`:
      ```cmake
@@ -45,6 +49,7 @@ yet — it documents the patch set required to land the feature.
 
 4. **Implement the staging API in `rgb_underglow_layer.c`** (currently the
    subsystem assumes these helpers exist):
+
    - `int zmk_rgb_underglow_layer_stage_set(uint32_t layer_id, uint32_t pos, uint32_t color)`
    - `int zmk_rgb_underglow_layer_set_transparent(uint32_t layer_id, bool t)`
    - `int zmk_rgb_underglow_layer_get_color(uint32_t layer_id, uint32_t pos, uint32_t *out)`
@@ -62,13 +67,13 @@ yet — it documents the patch set required to land the feature.
 
 `color` is a 32-bit value: `0xEERRGGBB`.
 
-| EE byte    | Meaning                                                 |
-|------------|---------------------------------------------------------|
-| `0x00`     | Solid color (RGB used as-is)                            |
-| `0x01`     | Breathe effect, color = breathe color                   |
-| `0x02`     | Pulse effect                                            |
-| `0x04`     | Dim                                                     |
-| `0xFF`     | Transparent — key falls through to base animation       |
+| EE byte | Meaning                                           |
+| ------- | ------------------------------------------------- |
+| `0x00`  | Solid color (RGB used as-is)                      |
+| `0x01`  | Breathe effect, color = breathe color             |
+| `0x02`  | Pulse effect                                      |
+| `0x04`  | Dim                                               |
+| `0xFF`  | Transparent — key falls through to base animation |
 
 Multiple effect bits can be OR'd if the runtime supports it.
 

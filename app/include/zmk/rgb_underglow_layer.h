@@ -11,12 +11,12 @@
 
 /* Live per-key colour overlay edited via the rgb Studio subsystem. Values are
  * packed 0xEERRGGBB. layer_id is the Studio-side persistent layer id. */
-int  zmk_rgb_underglow_layer_stage_set(uint32_t layer_id, uint32_t key_pos, uint32_t color);
-int  zmk_rgb_underglow_layer_set_transparent(uint32_t layer_id, bool transparent);
-int  zmk_rgb_underglow_layer_get_color(uint32_t layer_id, uint32_t key_pos, uint32_t *out);
+int zmk_rgb_underglow_layer_stage_set(uint32_t layer_id, uint32_t key_pos, uint32_t color);
+int zmk_rgb_underglow_layer_set_transparent(uint32_t layer_id, bool transparent);
+int zmk_rgb_underglow_layer_get_color(uint32_t layer_id, uint32_t key_pos, uint32_t *out);
 bool zmk_rgb_underglow_layer_is_transparent(uint32_t layer_id);
 void zmk_rgb_underglow_layer_clear(uint32_t layer_id);
-int  zmk_rgb_underglow_layer_save(void);
+int zmk_rgb_underglow_layer_save(void);
 void zmk_rgb_underglow_layer_discard(void);
 void zmk_rgb_underglow_layer_reset_all(void);
 
