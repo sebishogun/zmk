@@ -1,0 +1,78 @@
+// Per-key RGB live-control RPC subsystem for AuroraKey.
+// To wire into ZMK Studio: add `zmk.rgb.Request rgb = 6;` to the Request /
+// RequestResponse / Notification oneofs in studio.proto, then re-run nanopb.
+syntax = "proto3";
+
+package zmk.rgb;
+
+message Request {
+    oneof request_type {
+        SetKeyColorRequest set_key_color = 1;
+        SetLayerTransparentRequest set_layer_transparent = 2;
+        GetLayerColorsRequest get_layer_colors = 3;
+        ClearLayerRequest clear_layer = 4;
+        bool save_changes = 5;
+        bool discard_changes = 6;
+    }
+}
+
+message Response {
+    oneof response_type {
+        SetKeyColorResponse set_key_color = 1;
+        SetLayerTransparentResponse set_layer_transparent = 2;
+        LayerColors get_layer_colors = 3;
+        bool clear_layer = 4;
+        bool save_changes = 5;
+        bool discard_changes = 6;
+    }
+}
+
+message Notification {
+    oneof notification_type {
+        bool layer_colors_changed = 1;
+    }
+}
+
+// color is packed: 0xEERRGGBB where EE is the per-key effect mask
+// (1=breathe, 2=pulse, 4=dim, 0xFF=transparent → fall through to base anim).
+message SetKeyColorRequest {
+    uint32 layer_id = 1;
+    uint32 key_position = 2;
+    uint32 color = 3;
+}
+
+enum SetKeyColorResponse {
+    SET_KEY_COLOR_RESP_OK = 0;
+    SET_KEY_COLOR_RESP_INVALID_LAYER = 1;
+    SET_KEY_COLOR_RESP_INVALID_KEY = 2;
+    SET_KEY_COLOR_RESP_NO_SPACE = 3;
+}
+
+message SetLayerTransparentRequest {
+    uint32 layer_id = 1;
+    bool transparent = 2;
+}
+
+enum SetLayerTransparentResponse {
+    SET_LAYER_TRANSPARENT_RESP_OK = 0;
+    SET_LAYER_TRANSPARENT_RESP_INVALID_LAYER = 1;
+}
+
+message GetLayerColorsRequest {
+    uint32 layer_id = 1;
+}
+
+message LayerColors {
+    uint32 layer_id = 1;
+    bool transparent = 2;
+    repeated KeyColor keys = 3;
+}
+
+message KeyColor {
+    uint32 key_position = 1;
+    uint32 color = 2;
+}
+
+message ClearLayerRequest {
+    uint32 layer_id = 1;
+}
