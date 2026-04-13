@@ -275,7 +275,10 @@ static void zmk_rgb_underglow_tick(struct k_work *work) {
 K_WORK_DEFINE(underglow_tick_work, zmk_rgb_underglow_tick);
 
 static void zmk_rgb_underglow_tick_handler(struct k_timer *timer) {
-    if (!state.on) {
+    /* Tick the renderer when underglow is on OR when an RGB_STATUS popup is
+     * active — the popup needs to drive the LEDs even if the user has the
+     * normal animation turned off. */
+    if (!state.on && !state.status_active) {
         return;
     }
 
@@ -917,6 +920,12 @@ static void zmk_rgb_underglow_status_update(struct k_timer *timer) {
     if (state.status_animation_step > (10000 / 25)) {
         state.status_active = false;
         k_timer_stop(&underglow_status_update_timer);
+        /* If user had base animation off, popup ending means there's nothing
+         * to render — stop the main tick too so we don't burn CPU painting
+         * black every 25 ms. */
+        if (!state.on) {
+            k_timer_stop(&underglow_tick);
+        }
     }
     if (!k_work_is_pending(&underglow_tick_work)) {
         k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &underglow_tick_work);
