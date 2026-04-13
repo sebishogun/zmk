@@ -31,6 +31,7 @@
 #include <zmk/hid_indicators.h>
 #include <dt-bindings/zmk/hid_indicators.h>
 #include <zmk/keymap.h>
+#include <zmk/matrix.h>
 
 #if IS_ENABLED(CONFIG_ZMK_BATTERY_REPORTING)
 #include <zmk/battery.h>
