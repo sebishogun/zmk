@@ -604,7 +604,10 @@ ZMK_SUBSCRIPTION(rgb_underglow, zmk_activity_state_changed);
 ZMK_SUBSCRIPTION(rgb_underglow, zmk_usb_conn_state_changed);
 #endif
 
-#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
+#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+/* zmk_layer_state_changed only exists on the split central. Peripheral gets
+ * its layer state via the split transport callback that writes into
+ * peripheral_layers_state(). */
 ZMK_SUBSCRIPTION(rgb_underglow, zmk_layer_state_changed);
 #endif
 
