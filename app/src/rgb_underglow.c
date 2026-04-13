@@ -72,6 +72,8 @@ static int zmk_rgb_underglow_apply_merged_rgbmap(void);
 static void zmk_rgb_underglow_set_layer(uint8_t layer, bool wakeup);
 #endif
 
+void zmk_rgb_set_ext_power(void);
+
 #define HUE_MAX 360
 #define SAT_MAX 100
 #define BRT_MAX 100
@@ -356,6 +358,10 @@ static int zmk_rgb_underglow_init(void) {
 #endif
 
     if (state.on) {
+        /* Turn on EXT_POWER so the WS2812 strip actually gets power. On the LH
+         * central this was masked because backlight also enables EXT_POWER;
+         * on the RH peripheral (no backlight) the strip was powered down. */
+        zmk_rgb_set_ext_power();
         k_timer_start(&underglow_tick, K_NO_WAIT, K_MSEC(50));
     }
 
@@ -377,6 +383,38 @@ int zmk_rgb_underglow_get_state(bool *on_off) {
 
     *on_off = state.on;
     return 0;
+}
+
+void zmk_rgb_set_ext_power(void) {
+#if IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_EXT_POWER)
+    if (ext_power == NULL)
+        return;
+    int c_power = ext_power_get(ext_power);
+    if (c_power < 0) {
+        LOG_ERR("Unable to examine EXT_POWER: %d", c_power);
+        c_power = 0;
+    }
+    int desired_state = state.on || state.status_active;
+
+#if IS_ENABLED(CONFIG_ZMK_BATTERY_REPORTING)
+    /* Force off when battery low (<10%) to avoid browning out. */
+    if (state.on && !state.status_active) {
+        if (zmk_battery_state_of_charge() < 10) {
+            desired_state = 0;
+        }
+    }
+#endif
+
+    if (desired_state && !c_power) {
+        int rc = ext_power_enable(ext_power);
+        if (rc != 0)
+            LOG_ERR("Unable to enable EXT_POWER: %d", rc);
+    } else if (!desired_state && c_power) {
+        int rc = ext_power_disable(ext_power);
+        if (rc != 0)
+            LOG_ERR("Unable to disable EXT_POWER: %d", rc);
+    }
+#endif
 }
 
 int zmk_rgb_underglow_on(void) {
