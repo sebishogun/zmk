@@ -580,7 +580,9 @@ static int rgb_underglow_event_listener(const zmk_event_t *eh) {
     }
 #endif
 
-#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED)
+#if IS_ENABLED(UNDERGLOW_LAYER_ENABLED) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+    /* layer_state_changed is only raised on the central half. Peripheral
+     * receives layer state via the split comms path (handled elsewhere). */
     if (as_zmk_layer_state_changed(eh)) {
         uint8_t layer = zmk_keymap_highest_layer_active();
         zmk_rgb_underglow_set_layer(layer, true);
