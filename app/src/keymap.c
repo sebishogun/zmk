@@ -645,8 +645,8 @@ static int keymap_track_changed_bindings(const char *key, size_t len, settings_r
                                          void *cb_arg, void *param) {
     const char *next;
     if (settings_name_steq(key, "l", &next) && next) {
-        uint8_t (*state)[ZMK_KEYMAP_LAYERS_LEN][PENDING_ARRAY_SIZE] =
-            (uint8_t (*)[ZMK_KEYMAP_LAYERS_LEN][PENDING_ARRAY_SIZE])param;
+        uint8_t(*state)[ZMK_KEYMAP_LAYERS_LEN][PENDING_ARRAY_SIZE] =
+            (uint8_t(*)[ZMK_KEYMAP_LAYERS_LEN][PENDING_ARRAY_SIZE])param;
         char *endptr;
         uint8_t layer = strtoul(next, &endptr, 10);
         if (*endptr != '/') {
