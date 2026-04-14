@@ -131,12 +131,17 @@ static ssize_t split_svc_select_phys_layout(struct bt_conn *conn, const struct b
 }
 
 #if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+#include <zmk/split/peripheral_layers.h>
+
 /* Active-layer bitmap received from central. Raised as an event so the
- * peripheral's rgb_underglow listener can update its mirrored state. */
+ * peripheral's rgb_underglow listener can update its mirrored state, AND
+ * mirrored directly via set_peripheral_layers_state so the overlay render
+ * path sees the new state even if the event dispatch is delayed. */
 static uint32_t pending_layer_state = 0;
 
 static void split_svc_update_layers_callback(struct k_work *work) {
     LOG_DBG("Setting peripheral layers: 0x%08x", pending_layer_state);
+    set_peripheral_layers_state(pending_layer_state);
     raise_zmk_split_peripheral_layer_changed(
         (struct zmk_split_peripheral_layer_changed){.layers = pending_layer_state});
 }
