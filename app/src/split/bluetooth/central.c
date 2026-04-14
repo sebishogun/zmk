@@ -707,6 +707,12 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
     subscribed = subscribed && slot->update_hid_indicators;
 #endif // IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+    // Without this, discovery stops as soon as the other required handles are
+    // found — which happens BEFORE the update_layers char at the end of the
+    // attribute list. Handle stays 0, layer-sync writes silently dropped.
+    subscribed = subscribed && slot->update_layers_handle;
+#endif // IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
     subscribed = subscribed && slot->batt_lvl_subscribe_params.value_handle;
 #endif /* IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING) */
