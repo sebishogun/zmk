@@ -41,6 +41,12 @@ int zmk_split_central_update_hid_indicator(zmk_hid_indicators_t indicators);
 
 #endif // IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
 
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+
+int zmk_split_central_update_layers(uint32_t layers);
+
+#endif // IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
 
 int zmk_split_central_get_peripheral_battery_level(uint8_t source, uint8_t *level);

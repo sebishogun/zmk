@@ -23,6 +23,11 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/events/layer_state_changed.h>
 #include <zmk/events/sensor_event.h>
 
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER) && IS_ENABLED(CONFIG_ZMK_SPLIT)
+#include <zmk/split/central.h>
+#include <zmk/events/split_peripheral_layer_changed.h>
+#endif
+
 static zmk_keymap_layers_state_t _zmk_keymap_layer_locks = 0;
 static zmk_keymap_layers_state_t _zmk_keymap_layer_state = 0;
 static zmk_keymap_layer_id_t _zmk_keymap_layer_default = 0;
@@ -161,6 +166,15 @@ static inline int set_layer_state(zmk_keymap_layer_id_t layer_id, bool state, bo
         if (ret < 0) {
             LOG_WRN("Failed to raise layer state changed (%d)", ret);
         }
+
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER) && IS_ENABLED(CONFIG_ZMK_SPLIT)
+        // Push the new layer bitmap to peripherals via the upstream transport
+        // pipeline, then raise the same event locally on central so its own
+        // RGB overlay listener updates. Synchronous — no event-manager race.
+        (void)zmk_split_central_update_layers(_zmk_keymap_layer_state);
+        raise_zmk_split_peripheral_layer_changed(
+            (struct zmk_split_peripheral_layer_changed){.layers = _zmk_keymap_layer_state});
+#endif
     }
 
     return ret;
@@ -631,8 +645,8 @@ static int keymap_track_changed_bindings(const char *key, size_t len, settings_r
                                          void *cb_arg, void *param) {
     const char *next;
     if (settings_name_steq(key, "l", &next) && next) {
-        uint8_t(*state)[ZMK_KEYMAP_LAYERS_LEN][PENDING_ARRAY_SIZE] =
-            (uint8_t(*)[ZMK_KEYMAP_LAYERS_LEN][PENDING_ARRAY_SIZE])param;
+        uint8_t (*state)[ZMK_KEYMAP_LAYERS_LEN][PENDING_ARRAY_SIZE] =
+            (uint8_t (*)[ZMK_KEYMAP_LAYERS_LEN][PENDING_ARRAY_SIZE])param;
         char *endptr;
         uint8_t layer = strtoul(next, &endptr, 10);
         if (*endptr != '/') {

@@ -33,10 +33,6 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/pointing/input_split.h>
 #include <zmk/hid_indicators_types.h>
 #include <zmk/physical_layouts.h>
-#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
-#include <zmk/keymap.h>
-#include <zmk/events/layer_state_changed.h>
-#endif
 
 static int start_scanning(void);
 
@@ -1109,6 +1105,26 @@ void split_central_split_run_callback(struct k_work *work) {
             }
             break;
 #endif // IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+        case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_LAYERS: {
+            if (peripherals[payload_wrapper.source].update_layers_handle == 0) {
+                // Discovery hasn't finished yet — silently skip, the next
+                // layer change will retry.
+                LOG_DBG("No update_layers handle on peripheral %d yet", payload_wrapper.source);
+                break;
+            }
+            int layers_err = bt_gatt_write_without_response(
+                peripherals[payload_wrapper.source].conn,
+                peripherals[payload_wrapper.source].update_layers_handle,
+                &payload_wrapper.cmd.data.set_rgb_layers.layers,
+                sizeof(payload_wrapper.cmd.data.set_rgb_layers.layers), true);
+            if (layers_err) {
+                LOG_ERR("Failed to send RGB layers to peripheral %d (err %d)",
+                        payload_wrapper.source, layers_err);
+            }
+            break;
+        }
+#endif // IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
         default:
             LOG_WRN("Unsupported wrapped central command type %d", payload_wrapper.cmd.type);
             return;
@@ -1173,45 +1189,15 @@ static int zmk_split_bt_central_init(void) {
 
 SYS_INIT(zmk_split_bt_central_init, APPLICATION, CONFIG_ZMK_BLE_INIT_PRIORITY);
 
-#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
-static uint32_t layers_for_peripheral = 0;
-
-static void split_central_update_layers_callback(struct k_work *work) {
-    uint32_t layers = layers_for_peripheral;
-    for (int i = 0; i < CONFIG_ZMK_SPLIT_BLE_CENTRAL_PERIPHERALS; i++) {
-        if (peripherals[i].state != PERIPHERAL_SLOT_STATE_CONNECTED)
-            continue;
-        if (peripherals[i].update_layers_handle == 0)
-            continue;
-        int err =
-            bt_gatt_write_without_response(peripherals[i].conn, peripherals[i].update_layers_handle,
-                                           &layers, sizeof(layers), true);
-        if (err) {
-            LOG_ERR("Failed to send layers to peripheral (err %d)", err);
-        }
-    }
-}
-static K_WORK_DEFINE(split_central_update_layers_work, split_central_update_layers_callback);
-#endif
-
 static int zmk_split_bt_central_listener_cb(const zmk_event_t *eh) {
     if (as_zmk_physical_layout_selection_changed(eh)) {
         k_work_submit(&update_peripherals_selected_layouts_work);
     }
-#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
-    if (as_zmk_layer_state_changed(eh)) {
-        layers_for_peripheral = zmk_keymap_layer_state();
-        k_work_submit_to_queue(&split_central_split_run_q, &split_central_update_layers_work);
-    }
-#endif
     return ZMK_EV_EVENT_BUBBLE;
 }
 
 ZMK_LISTENER(zmk_split_bt_central, zmk_split_bt_central_listener_cb);
 ZMK_SUBSCRIPTION(zmk_split_bt_central, zmk_physical_layout_selection_changed);
-#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
-ZMK_SUBSCRIPTION(zmk_split_bt_central, zmk_layer_state_changed);
-#endif
 
 static int split_central_bt_send_command(uint8_t source,
                                          struct zmk_split_transport_central_command cmd) {
@@ -1222,7 +1208,11 @@ static int split_central_bt_send_command(uint8_t source,
     switch (cmd.type) {
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_HID_INDICATORS:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_PHYSICAL_LAYOUT:
-    case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_INVOKE_BEHAVIOR: {
+    case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_INVOKE_BEHAVIOR:
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+    case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_LAYERS:
+#endif
+    {
         struct central_cmd_wrapper wrapper = {.source = source, .cmd = cmd};
         return split_bt_invoke_behavior_payload(wrapper);
     }
