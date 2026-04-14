@@ -18,6 +18,7 @@
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #include <pb_encode.h>
+#include <zmk/matrix.h>
 #include <zmk/studio/core.h>
 #include <zmk/studio/rpc.h>
 #include <zmk/rgb_underglow.h>
