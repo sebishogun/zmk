@@ -28,7 +28,7 @@ ZMK_RPC_SUBSYSTEM(rgb)
 
 #define RGB_RESPONSE(type, ...) ZMK_RPC_RESPONSE(rgb, type, __VA_ARGS__)
 
-zmk_studio_Response set_key_color(const zmk_studio_Request *req) {
+static zmk_studio_Response set_key_color(const zmk_studio_Request *req) {
     const zmk_rgb_SetKeyColorRequest *r = &req->subsystem.rgb.request_type.set_key_color;
     int ret = zmk_rgb_underglow_layer_stage_set(r->layer_id, r->key_position, r->color);
     zmk_rgb_SetKeyColorResponse resp;
@@ -49,7 +49,7 @@ zmk_studio_Response set_key_color(const zmk_studio_Request *req) {
     return RGB_RESPONSE(set_key_color, resp);
 }
 
-zmk_studio_Response set_layer_transparent(const zmk_studio_Request *req) {
+static zmk_studio_Response set_layer_transparent(const zmk_studio_Request *req) {
     const zmk_rgb_SetLayerTransparentRequest *r =
         &req->subsystem.rgb.request_type.set_layer_transparent;
     int ret = zmk_rgb_underglow_layer_set_transparent(r->layer_id, r->transparent);
@@ -75,7 +75,7 @@ static bool encode_layer_colors_keys(pb_ostream_t *stream, const pb_field_t *fie
     return true;
 }
 
-zmk_studio_Response get_layer_colors(const zmk_studio_Request *req) {
+static zmk_studio_Response get_layer_colors(const zmk_studio_Request *req) {
     const zmk_rgb_GetLayerColorsRequest *r = &req->subsystem.rgb.request_type.get_layer_colors;
     zmk_rgb_LayerColors resp = zmk_rgb_LayerColors_init_zero;
     resp.layer_id = r->layer_id;
@@ -85,18 +85,18 @@ zmk_studio_Response get_layer_colors(const zmk_studio_Request *req) {
     return RGB_RESPONSE(get_layer_colors, resp);
 }
 
-zmk_studio_Response clear_layer(const zmk_studio_Request *req) {
+static zmk_studio_Response clear_layer(const zmk_studio_Request *req) {
     uint32_t layer_id = req->subsystem.rgb.request_type.clear_layer.layer_id;
     zmk_rgb_underglow_layer_clear(layer_id);
     return RGB_RESPONSE(clear_layer, true);
 }
 
-zmk_studio_Response save_changes(const zmk_studio_Request *req) {
+static zmk_studio_Response save_changes(const zmk_studio_Request *req) {
     int ret = zmk_rgb_underglow_layer_save();
     return RGB_RESPONSE(save_changes, ret == 0);
 }
 
-zmk_studio_Response discard_changes(const zmk_studio_Request *req) {
+static zmk_studio_Response discard_changes(const zmk_studio_Request *req) {
     zmk_rgb_underglow_layer_discard();
     return RGB_RESPONSE(discard_changes, true);
 }
