@@ -168,22 +168,56 @@ struct split_rgb_color_payload {
 } __packed;
 
 static struct split_rgb_color_payload pending_rgb_color;
+static uint8_t pending_rgb_opcode;
+static uint32_t pending_rgb_clear_layer_id;
 
 static void split_svc_update_rgb_color_callback(struct k_work *work) {
-    LOG_DBG("Applying RGB color: layer=%u key=%u color=0x%08x",
-            pending_rgb_color.layer_id, pending_rgb_color.key_pos, pending_rgb_color.color);
-    zmk_rgb_underglow_layer_stage_set(pending_rgb_color.layer_id, pending_rgb_color.key_pos,
-                                      pending_rgb_color.color);
+    switch (pending_rgb_opcode) {
+    case 0x01: // set_color
+        LOG_DBG("Applying RGB color: layer=%u key=%u color=0x%08x",
+                pending_rgb_color.layer_id, pending_rgb_color.key_pos, pending_rgb_color.color);
+        zmk_rgb_underglow_layer_stage_set(pending_rgb_color.layer_id, pending_rgb_color.key_pos,
+                                          pending_rgb_color.color);
+        break;
+    case 0x02: // save
+        LOG_DBG("RGB save from central");
+        zmk_rgb_underglow_layer_save();
+        break;
+    case 0x03: // discard
+        LOG_DBG("RGB discard from central");
+        zmk_rgb_underglow_layer_discard();
+        break;
+    case 0x04: // clear_layer
+        LOG_DBG("RGB clear layer %u from central", pending_rgb_clear_layer_id);
+        zmk_rgb_underglow_layer_clear(pending_rgb_clear_layer_id);
+        break;
+    }
 }
 static K_WORK_DEFINE(split_svc_update_rgb_color_work, split_svc_update_rgb_color_callback);
 
 static ssize_t split_svc_update_rgb_color(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                                           const void *buf, uint16_t len, uint16_t offset,
                                           uint8_t flags) {
-    if (offset + len > sizeof(struct split_rgb_color_payload)) {
-        return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+    if (len < 1) {
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
     }
-    memcpy((uint8_t *)&pending_rgb_color + offset, buf, len);
+    const uint8_t *data = buf;
+    pending_rgb_opcode = data[0];
+    switch (pending_rgb_opcode) {
+    case 0x01: // set_color: 1 opcode + 12 payload
+        if (len < 13) return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+        memcpy(&pending_rgb_color, &data[1], sizeof(pending_rgb_color));
+        break;
+    case 0x04: // clear_layer: 1 opcode + 4 layer_id
+        if (len < 5) return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+        memcpy(&pending_rgb_clear_layer_id, &data[1], 4);
+        break;
+    case 0x02: // save — no payload
+    case 0x03: // discard — no payload
+        break;
+    default:
+        return BT_GATT_ERR(BT_ATT_ERR_NOT_SUPPORTED);
+    }
     k_work_submit(&split_svc_update_rgb_color_work);
     return len;
 }

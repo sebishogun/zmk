@@ -1143,15 +1143,39 @@ void split_central_split_run_callback(struct k_work *work) {
                         payload_wrapper.source);
                 break;
             }
+            uint8_t color_buf[13]; // opcode + 3×uint32
+            color_buf[0] = 0x01;  // opcode: set_color
+            memcpy(&color_buf[1], &payload_wrapper.cmd.data.set_rgb_color, 12);
             int color_err = bt_gatt_write_without_response(
                 peripherals[payload_wrapper.source].conn,
                 peripherals[payload_wrapper.source].update_rgb_color_handle,
-                &payload_wrapper.cmd.data.set_rgb_color,
-                sizeof(payload_wrapper.cmd.data.set_rgb_color), true);
+                color_buf, sizeof(color_buf), true);
             if (color_err) {
                 LOG_ERR("Failed to send RGB color to peripheral %d (err %d)",
                         payload_wrapper.source, color_err);
             }
+            break;
+        }
+        case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_SAVE:
+        case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_DISCARD: {
+            if (peripherals[payload_wrapper.source].update_rgb_color_handle == 0) break;
+            uint8_t op = (payload_wrapper.cmd.type ==
+                          ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_SAVE) ? 0x02 : 0x03;
+            bt_gatt_write_without_response(
+                peripherals[payload_wrapper.source].conn,
+                peripherals[payload_wrapper.source].update_rgb_color_handle,
+                &op, 1, true);
+            break;
+        }
+        case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_CLEAR: {
+            if (peripherals[payload_wrapper.source].update_rgb_color_handle == 0) break;
+            uint8_t clear_buf[5];
+            clear_buf[0] = 0x04; // opcode: clear_layer
+            memcpy(&clear_buf[1], &payload_wrapper.cmd.data.set_rgb_clear.layer_id, 4);
+            bt_gatt_write_without_response(
+                peripherals[payload_wrapper.source].conn,
+                peripherals[payload_wrapper.source].update_rgb_color_handle,
+                clear_buf, sizeof(clear_buf), true);
             break;
         }
 #endif // IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
@@ -1242,6 +1266,9 @@ static int split_central_bt_send_command(uint8_t source,
 #if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_LAYERS:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_COLOR:
+    case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_SAVE:
+    case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_DISCARD:
+    case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_CLEAR:
 #endif
     {
         struct central_cmd_wrapper wrapper = {.source = source, .cmd = cmd};

@@ -45,6 +45,9 @@ int zmk_split_central_update_hid_indicator(zmk_hid_indicators_t indicators);
 
 int zmk_split_central_update_layers(uint32_t layers);
 int zmk_split_central_update_rgb_color(uint32_t layer_id, uint32_t key_pos, uint32_t color);
+int zmk_split_central_rgb_save(void);
+int zmk_split_central_rgb_discard(void);
+int zmk_split_central_rgb_clear_layer(uint32_t layer_id);
 
 #endif // IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
 

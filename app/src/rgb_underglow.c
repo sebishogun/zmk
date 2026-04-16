@@ -756,17 +756,26 @@ static int zmk_rgb_underglow_apply_merged_rgbmap(void) {
             struct led_rgb pixel_color =
                 hex_to_rgb((rgb_color >> 16) & 0xFF, (rgb_color >> 8) & 0xFF, rgb_color & 0xFF);
 
+            /* Per-key effects use k_uptime_get() for timing instead of the
+             * shared state.animation_step counter. The shared counter wraps
+             * at different moduli depending on which stock background effect
+             * is active (2400 for breathe, 360 for spectrum/swirl), which
+             * made per-key breathe/pulse either absurdly slow (2-min cycle
+             * on stock breathe) or entirely broken (never completing a full
+             * cycle on spectrum/swirl). Wall-clock milliseconds give
+             * predictable, stock-animation-independent cycle times. */
+            uint32_t ms = (uint32_t)k_uptime_get();
             switch (effect_mode) {
-            case 1: { // breathe
-                int brt = abs((int)(state.animation_step % 2400) - 1200) * 255 / 1200;
+            case 1: { // breathe — 3 s full cycle (1.5 s fade in + 1.5 s out)
+                int brt = abs((int)(ms % 3000) - 1500) * 255 / 1500;
                 pixel_color.r = pixel_color.r * brt / 255;
                 pixel_color.g = pixel_color.g * brt / 255;
                 pixel_color.b = pixel_color.b * brt / 255;
                 break;
             }
-            case 2: { // pulse
-                int phase = state.animation_step % 1200;
-                if (phase > 300) {
+            case 2: { // pulse — 2 s cycle, flash on for 250 ms
+                int phase = ms % 2000;
+                if (phase > 250) {
                     pixel_color.r = 0;
                     pixel_color.g = 0;
                     pixel_color.b = 0;
