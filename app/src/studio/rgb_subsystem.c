@@ -24,6 +24,10 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/rgb_underglow.h>
 #include <zmk/rgb_underglow_layer.h>
 
+#if IS_ENABLED(CONFIG_ZMK_SPLIT) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+#include <zmk/split/central.h>
+#endif
+
 ZMK_RPC_SUBSYSTEM(rgb)
 
 #define RGB_RESPONSE(type, ...) ZMK_RPC_RESPONSE(rgb, type, __VA_ARGS__)
@@ -35,6 +39,10 @@ static zmk_studio_Response set_key_color(const zmk_studio_Request *req) {
     switch (ret) {
     case 0:
         resp = zmk_rgb_SetKeyColorResponse_SET_KEY_COLOR_RESP_OK;
+#if IS_ENABLED(CONFIG_ZMK_SPLIT) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && \
+    IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+        zmk_split_central_update_rgb_color(r->layer_id, r->key_position, r->color);
+#endif
         break;
     case -EINVAL:
         resp = zmk_rgb_SetKeyColorResponse_SET_KEY_COLOR_RESP_INVALID_LAYER;

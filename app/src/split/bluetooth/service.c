@@ -132,6 +132,7 @@ static ssize_t split_svc_select_phys_layout(struct bt_conn *conn, const struct b
 
 #if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
 #include <zmk/split/peripheral_layers.h>
+#include <zmk/rgb_underglow_layer.h>
 
 /* Active-layer bitmap received from central. Raised as an event so the
  * peripheral's rgb_underglow listener can update its mirrored state, AND
@@ -155,6 +156,35 @@ static ssize_t split_svc_update_layers(struct bt_conn *conn, const struct bt_gat
     }
     memcpy((uint8_t *)&pending_layer_state + offset, buf, len);
     k_work_submit(&split_svc_update_layers_work);
+    return len;
+}
+
+/* Per-key RGB color forwarded from central (Studio live-edit).
+ * Payload: layer_id (u32) + key_pos (u32) + color (u32) = 12 bytes. */
+struct split_rgb_color_payload {
+    uint32_t layer_id;
+    uint32_t key_pos;
+    uint32_t color;
+} __packed;
+
+static struct split_rgb_color_payload pending_rgb_color;
+
+static void split_svc_update_rgb_color_callback(struct k_work *work) {
+    LOG_DBG("Applying RGB color: layer=%u key=%u color=0x%08x",
+            pending_rgb_color.layer_id, pending_rgb_color.key_pos, pending_rgb_color.color);
+    zmk_rgb_underglow_layer_stage_set(pending_rgb_color.layer_id, pending_rgb_color.key_pos,
+                                      pending_rgb_color.color);
+}
+static K_WORK_DEFINE(split_svc_update_rgb_color_work, split_svc_update_rgb_color_callback);
+
+static ssize_t split_svc_update_rgb_color(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                                          const void *buf, uint16_t len, uint16_t offset,
+                                          uint8_t flags) {
+    if (offset + len > sizeof(struct split_rgb_color_payload)) {
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+    }
+    memcpy((uint8_t *)&pending_rgb_color + offset, buf, len);
+    k_work_submit(&split_svc_update_rgb_color_work);
     return len;
 }
 #endif // CONFIG_EXPERIMENTAL_RGB_LAYER
@@ -242,6 +272,9 @@ BT_GATT_SERVICE_DEFINE(
     BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(ZMK_SPLIT_BT_UPDATE_LAYERS_UUID),
                            BT_GATT_CHRC_WRITE_WITHOUT_RESP, BT_GATT_PERM_WRITE_ENCRYPT, NULL,
                            split_svc_update_layers, NULL),
+    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(ZMK_SPLIT_BT_UPDATE_RGB_COLOR_UUID),
+                           BT_GATT_CHRC_WRITE_WITHOUT_RESP, BT_GATT_PERM_WRITE_ENCRYPT, NULL,
+                           split_svc_update_rgb_color, NULL),
 #endif
 );
 

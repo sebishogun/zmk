@@ -23,3 +23,7 @@
 /* AuroraKey: used by central to push the active-layer bitmap to peripheral so
  * per-key RGB overlay knows which layer is active. Write-without-response. */
 #define ZMK_SPLIT_BT_UPDATE_LAYERS_UUID ZMK_BT_SPLIT_UUID(0x00000007)
+/* AuroraKey: used by central to forward per-key RGB color updates from Studio
+ * to peripheral so live-edit colors appear on both halves. 12-byte payload:
+ * layer_id (u32) + key_pos (u32) + color (u32). Write-without-response. */
+#define ZMK_SPLIT_BT_UPDATE_RGB_COLOR_UUID ZMK_BT_SPLIT_UUID(0x00000008)
