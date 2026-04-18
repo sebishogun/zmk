@@ -42,8 +42,14 @@ static inline void mask_set(uint8_t *mask, uint32_t key) {
 static inline void mask_clear_all(uint8_t *mask) { memset(mask, 0, MASK_BYTES); }
 
 /* Resolve a Studio-side persistent layer_id → runtime index by scanning the
- * keymap. Returns -1 if not present. */
+ * keymap. Returns -1 if not present.
+ *
+ * Peripheral builds don't link zmk_keymap_layer_index_to_id — it lives on the
+ * central only. Central forwards the ALREADY-resolved index across the BLE
+ * split (see split/bluetooth/central.c), so on the peripheral side we treat
+ * the incoming value as a direct index. */
 static int layer_id_to_index(uint32_t layer_id) {
+#if !IS_ENABLED(CONFIG_ZMK_SPLIT) || IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
     for (int i = 0; i < LAYERS; i++) {
         if (zmk_keymap_layer_index_to_id((zmk_keymap_layer_index_t)i) ==
             (zmk_keymap_layer_id_t)layer_id) {
@@ -51,6 +57,9 @@ static int layer_id_to_index(uint32_t layer_id) {
         }
     }
     return -1;
+#else
+    return (layer_id < LAYERS) ? (int)layer_id : -1;
+#endif
 }
 
 /* ── Public API consumed by the rgb subsystem RPC handlers ─────────────── */
