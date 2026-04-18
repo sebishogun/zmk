@@ -39,7 +39,7 @@ static zmk_studio_Response set_key_color(const zmk_studio_Request *req) {
     switch (ret) {
     case 0:
         resp = zmk_rgb_SetKeyColorResponse_SET_KEY_COLOR_RESP_OK;
-#if IS_ENABLED(CONFIG_ZMK_SPLIT) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && \
+#if IS_ENABLED(CONFIG_ZMK_SPLIT) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) &&                   \
     IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
         zmk_split_central_update_rgb_color(r->layer_id, r->key_position, r->color);
 #endif
@@ -96,7 +96,7 @@ static zmk_studio_Response get_layer_colors(const zmk_studio_Request *req) {
 static zmk_studio_Response clear_layer(const zmk_studio_Request *req) {
     uint32_t layer_id = req->subsystem.rgb.request_type.clear_layer.layer_id;
     zmk_rgb_underglow_layer_clear(layer_id);
-#if IS_ENABLED(CONFIG_ZMK_SPLIT) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && \
+#if IS_ENABLED(CONFIG_ZMK_SPLIT) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) &&                   \
     IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
     zmk_split_central_rgb_clear_layer(layer_id);
 #endif
@@ -105,16 +105,17 @@ static zmk_studio_Response clear_layer(const zmk_studio_Request *req) {
 
 static zmk_studio_Response save_changes(const zmk_studio_Request *req) {
     int ret = zmk_rgb_underglow_layer_save();
-#if IS_ENABLED(CONFIG_ZMK_SPLIT) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && \
+#if IS_ENABLED(CONFIG_ZMK_SPLIT) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) &&                   \
     IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
-    if (ret == 0) zmk_split_central_rgb_save();
+    if (ret == 0)
+        zmk_split_central_rgb_save();
 #endif
     return RGB_RESPONSE(save_changes, ret == 0);
 }
 
 static zmk_studio_Response discard_changes(const zmk_studio_Request *req) {
     zmk_rgb_underglow_layer_discard();
-#if IS_ENABLED(CONFIG_ZMK_SPLIT) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && \
+#if IS_ENABLED(CONFIG_ZMK_SPLIT) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) &&                   \
     IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
     zmk_split_central_rgb_discard();
 #endif
