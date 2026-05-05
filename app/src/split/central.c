@@ -233,11 +233,13 @@ static int rgb_split_send_simple(enum zmk_split_transport_central_command_type t
     }
     uint8_t source_ids[ZMK_SPLIT_CENTRAL_PERIPHERAL_COUNT];
     int ret = active_transport->api->get_available_source_ids(source_ids);
-    if (ret < 0) return ret;
+    if (ret < 0)
+        return ret;
     struct zmk_split_transport_central_command command = {.type = type};
     for (size_t i = 0; i < ret; i++) {
         int err = active_transport->api->send_command(source_ids[i], command);
-        if (err < 0) return err;
+        if (err < 0)
+            return err;
     }
     return 0;
 }
@@ -257,14 +259,16 @@ int zmk_split_central_rgb_clear_layer(uint32_t layer_id) {
     }
     uint8_t source_ids[ZMK_SPLIT_CENTRAL_PERIPHERAL_COUNT];
     int ret = active_transport->api->get_available_source_ids(source_ids);
-    if (ret < 0) return ret;
+    if (ret < 0)
+        return ret;
     struct zmk_split_transport_central_command command = {
         .type = ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_CLEAR,
         .data = {.set_rgb_clear = {.layer_id = layer_id}},
     };
     for (size_t i = 0; i < ret; i++) {
         int err = active_transport->api->send_command(source_ids[i], command);
-        if (err < 0) return err;
+        if (err < 0)
+            return err;
     }
     return 0;
 }

@@ -174,8 +174,8 @@ static uint32_t pending_rgb_clear_layer_id;
 static void split_svc_update_rgb_color_callback(struct k_work *work) {
     switch (pending_rgb_opcode) {
     case 0x01: // set_color
-        LOG_DBG("Applying RGB color: layer=%u key=%u color=0x%08x",
-                pending_rgb_color.layer_id, pending_rgb_color.key_pos, pending_rgb_color.color);
+        LOG_DBG("Applying RGB color: layer=%u key=%u color=0x%08x", pending_rgb_color.layer_id,
+                pending_rgb_color.key_pos, pending_rgb_color.color);
         zmk_rgb_underglow_layer_stage_set(pending_rgb_color.layer_id, pending_rgb_color.key_pos,
                                           pending_rgb_color.color);
         break;
@@ -205,11 +205,13 @@ static ssize_t split_svc_update_rgb_color(struct bt_conn *conn, const struct bt_
     pending_rgb_opcode = data[0];
     switch (pending_rgb_opcode) {
     case 0x01: // set_color: 1 opcode + 12 payload
-        if (len < 13) return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+        if (len < 13)
+            return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
         memcpy(&pending_rgb_color, &data[1], sizeof(pending_rgb_color));
         break;
     case 0x04: // clear_layer: 1 opcode + 4 layer_id
-        if (len < 5) return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+        if (len < 5)
+            return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
         memcpy(&pending_rgb_clear_layer_id, &data[1], 4);
         break;
     case 0x02: // save — no payload
