@@ -11,14 +11,4 @@ description: AuroraKey runtime-mutable macro slot
 
 compatible: "zmk,behavior-slot-macro"
 
-include: zero_param.yaml
-
-properties:
-  "#binding-cells":
-    type: int
-    required: true
-    const: 1
-    description: |
-      Slot index. The single param at use-time selects which mutable
-      slot fires. Slot count is set by CONFIG_ZMK_STUDIO_MACRO_SLOT_COUNT
-      (default 8). 1-cell binding so the keymap reads as `&slot_macro 0`.
+include: one_param.yaml
