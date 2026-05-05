@@ -24,7 +24,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #if IS_ENABLED(CONFIG_ZMK_STUDIO_MACRO_SLOT_POOL)
 
-#define SLOT_COUNT  CONFIG_ZMK_STUDIO_MACRO_SLOT_COUNT
+#define SLOT_COUNT CONFIG_ZMK_STUDIO_MACRO_SLOT_COUNT
 #define BINDINGS_MAX CONFIG_ZMK_STUDIO_MACRO_SLOT_BINDINGS_MAX
 
 /* Encoder for repeated MacroSlot — emits the SLOT_COUNT entries we
@@ -35,10 +35,10 @@ struct slots_state {
     size_t i;
 };
 
-static bool encode_macro_slots(pb_ostream_t *stream, const pb_field_t *field,
-                               void *const *arg) {
+static bool encode_macro_slots(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
     for (size_t i = 0; i < SLOT_COUNT; i++) {
-        if (!pb_encode_tag_for_field(stream, field)) return false;
+        if (!pb_encode_tag_for_field(stream, field))
+            return false;
         zmk_behaviors_MacroSlot slot = zmk_behaviors_MacroSlot_init_zero;
         slot.index = i;
         const struct zmk_slot_macro_state *st = zmk_slot_macro_get(i);
@@ -65,8 +65,7 @@ static bool encode_macro_slots(pb_ostream_t *stream, const pb_field_t *field,
 
 zmk_studio_Response list_macro_slots(const zmk_studio_Request *req) {
     LOG_DBG("");
-    zmk_behaviors_ListMacroSlotsResponse resp =
-        zmk_behaviors_ListMacroSlotsResponse_init_zero;
+    zmk_behaviors_ListMacroSlotsResponse resp = zmk_behaviors_ListMacroSlotsResponse_init_zero;
     resp.slots.funcs.encode = encode_macro_slots;
     resp.total_slots = SLOT_COUNT;
     return BEHAVIOR_RESPONSE(list_macro_slots, resp);
@@ -77,8 +76,7 @@ zmk_studio_Response set_macro_slot(const zmk_studio_Request *req) {
         &req->subsystem.behaviors.request_type.set_macro_slot;
     LOG_DBG("set_macro_slot idx=%u bindings=%u", r->index, r->bindings_count);
 
-    zmk_behaviors_SetMacroSlotResponse resp =
-        zmk_behaviors_SetMacroSlotResponse_init_zero;
+    zmk_behaviors_SetMacroSlotResponse resp = zmk_behaviors_SetMacroSlotResponse_init_zero;
 
     if (r->index >= SLOT_COUNT) {
         resp.result = zmk_behaviors_MacroSlotErrorCode_MACRO_SLOT_ERR_INVALID_INDEX;
@@ -93,8 +91,7 @@ zmk_studio_Response set_macro_slot(const zmk_studio_Request *req) {
      * request as a whole if any binding is bad. */
     for (size_t i = 0; i < r->bindings_count; i++) {
         if (!zmk_behavior_get_binding(r->bindings[i].behavior_id)) {
-            resp.result =
-                zmk_behaviors_MacroSlotErrorCode_MACRO_SLOT_ERR_INVALID_INNER_BEHAVIOR;
+            resp.result = zmk_behaviors_MacroSlotErrorCode_MACRO_SLOT_ERR_INVALID_INNER_BEHAVIOR;
             return BEHAVIOR_RESPONSE(set_macro_slot, resp);
         }
     }
@@ -105,11 +102,9 @@ zmk_studio_Response set_macro_slot(const zmk_studio_Request *req) {
         new_bindings[i].param1 = r->bindings[i].param1;
         new_bindings[i].param2 = r->bindings[i].param2;
     }
-    int rc = zmk_slot_macro_set(r->index, new_bindings, r->bindings_count,
-                                r->wait_ms, r->tap_ms);
-    resp.result = (rc == 0)
-        ? zmk_behaviors_MacroSlotErrorCode_MACRO_SLOT_ERR_OK
-        : zmk_behaviors_MacroSlotErrorCode_MACRO_SLOT_ERR_GENERIC;
+    int rc = zmk_slot_macro_set(r->index, new_bindings, r->bindings_count, r->wait_ms, r->tap_ms);
+    resp.result = (rc == 0) ? zmk_behaviors_MacroSlotErrorCode_MACRO_SLOT_ERR_OK
+                            : zmk_behaviors_MacroSlotErrorCode_MACRO_SLOT_ERR_GENERIC;
     return BEHAVIOR_RESPONSE(set_macro_slot, resp);
 }
 

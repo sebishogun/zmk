@@ -35,7 +35,7 @@ LOG_MODULE_REGISTER(behavior_slot_macro, CONFIG_ZMK_LOG_LEVEL);
 
 #if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT) && IS_ENABLED(CONFIG_ZMK_STUDIO_MACRO_SLOT_POOL)
 
-#define SLOT_COUNT  CONFIG_ZMK_STUDIO_MACRO_SLOT_COUNT
+#define SLOT_COUNT CONFIG_ZMK_STUDIO_MACRO_SLOT_COUNT
 #define BINDINGS_MAX CONFIG_ZMK_STUDIO_MACRO_SLOT_BINDINGS_MAX
 
 /* One backing buffer per slot. Marked aligned(4) so the atomic swap
@@ -53,20 +53,20 @@ static struct {
 static struct zmk_slot_macro_state slot_state[SLOT_COUNT];
 
 const struct zmk_slot_macro_state *zmk_slot_macro_get(size_t index) {
-    if (index >= SLOT_COUNT) return NULL;
+    if (index >= SLOT_COUNT)
+        return NULL;
     /* Reflect current atomic length at read time; the live storage
      * pointer is stable. */
     slot_state[index].bindings_len = (size_t)atomic_get(&slot_storage[index].bindings_len);
     return &slot_state[index];
 }
 
-int zmk_slot_macro_set(size_t index,
-                       const struct zmk_slot_macro_binding *bindings,
-                       size_t bindings_len,
-                       uint16_t wait_ms,
-                       uint16_t tap_ms) {
-    if (index >= SLOT_COUNT) return -EINVAL;
-    if (bindings_len > BINDINGS_MAX) return -EOVERFLOW;
+int zmk_slot_macro_set(size_t index, const struct zmk_slot_macro_binding *bindings,
+                       size_t bindings_len, uint16_t wait_ms, uint16_t tap_ms) {
+    if (index >= SLOT_COUNT)
+        return -EINVAL;
+    if (bindings_len > BINDINGS_MAX)
+        return -EOVERFLOW;
 
     /* Copy data first, publish length last. Concurrent readers see
      * either the old length or the new length; never a torn array. */
@@ -77,8 +77,8 @@ int zmk_slot_macro_set(size_t index,
     slot_storage[index].tap_ms = tap_ms;
     atomic_set(&slot_storage[index].bindings_len, (atomic_val_t)bindings_len);
 
-    LOG_INF("slot %zu rewritten: %zu bindings, wait=%u tap=%u",
-            index, bindings_len, wait_ms, tap_ms);
+    LOG_INF("slot %zu rewritten: %zu bindings, wait=%u tap=%u", index, bindings_len, wait_ms,
+            tap_ms);
     return 0;
 }
 
@@ -103,8 +103,10 @@ static int on_slot_macro_pressed(struct zmk_behavior_binding *binding,
      * editing a slot doesn't surprise users vs static macros. */
     int wait_ms = slot_storage[slot_idx].wait_ms;
     int tap_ms = slot_storage[slot_idx].tap_ms;
-    if (wait_ms == 0) wait_ms = CONFIG_ZMK_MACRO_DEFAULT_WAIT_MS;
-    if (tap_ms == 0) tap_ms = CONFIG_ZMK_MACRO_DEFAULT_TAP_MS;
+    if (wait_ms == 0)
+        wait_ms = CONFIG_ZMK_MACRO_DEFAULT_WAIT_MS;
+    if (tap_ms == 0)
+        tap_ms = CONFIG_ZMK_MACRO_DEFAULT_TAP_MS;
 
     for (size_t i = 0; i < n; i++) {
         struct zmk_slot_macro_binding *b = &slot_storage[slot_idx].bindings[i];
@@ -146,9 +148,8 @@ static int behavior_slot_macro_init(const struct device *dev) {
 }
 
 #define KP_INST(n)                                                                                 \
-    BEHAVIOR_DT_INST_DEFINE(n, behavior_slot_macro_init, NULL, NULL, NULL,                         \
-                            POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,                      \
-                            &behavior_slot_macro_driver_api);
+    BEHAVIOR_DT_INST_DEFINE(n, behavior_slot_macro_init, NULL, NULL, NULL, POST_KERNEL,            \
+                            CONFIG_KERNEL_INIT_PRIORITY_DEFAULT, &behavior_slot_macro_driver_api);
 
 DT_INST_FOREACH_STATUS_OKAY(KP_INST)
 

@@ -44,8 +44,5 @@ const struct zmk_slot_macro_state *zmk_slot_macro_get(size_t index);
  * function is the trusted writer. Atomic w.r.t. concurrent macro
  * playback — if a slot is currently firing, the swap takes effect
  * for the *next* invocation, never mid-flight. */
-int zmk_slot_macro_set(size_t index,
-                       const struct zmk_slot_macro_binding *bindings,
-                       size_t bindings_len,
-                       uint16_t wait_ms,
-                       uint16_t tap_ms);
+int zmk_slot_macro_set(size_t index, const struct zmk_slot_macro_binding *bindings,
+                       size_t bindings_len, uint16_t wait_ms, uint16_t tap_ms);

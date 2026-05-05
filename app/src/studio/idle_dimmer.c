@@ -27,12 +27,12 @@ LOG_MODULE_REGISTER(idle_dimmer, CONFIG_ZMK_LOG_LEVEL);
 
 #if IS_ENABLED(CONFIG_ZMK_STUDIO_IDLE_DIMMER)
 
-#define FLOOR_PCT     CONFIG_ZMK_STUDIO_IDLE_DIMMER_FLOOR_PCT
-#define RAMP_MS       CONFIG_ZMK_STUDIO_IDLE_DIMMER_RAMP_MS
+#define FLOOR_PCT CONFIG_ZMK_STUDIO_IDLE_DIMMER_FLOOR_PCT
+#define RAMP_MS CONFIG_ZMK_STUDIO_IDLE_DIMMER_RAMP_MS
 /* 16 steps gives a perceptually-smooth taper for the typical 800 ms
  * ramp window. Fewer steps and the eye sees discrete pops; more and
  * we burn idle CPU for sub-perceptual deltas. */
-#define STEPS         16
+#define STEPS 16
 #define STEP_INTERVAL (RAMP_MS / STEPS)
 
 /* Brightness anchor — captured at boot from the live config so the
@@ -65,8 +65,10 @@ static void ramp_step(struct k_work *work) {
     int diff = (int)target - (int)current_pct;
     int abs_diff = diff > 0 ? diff : -diff;
     int step = (abs_diff + STEPS - 1) / STEPS;
-    if (step < 1) step = 1;
-    if (diff < 0) step = -step;
+    if (step < 1)
+        step = 1;
+    if (diff < 0)
+        step = -step;
 
     int next = (int)current_pct + step;
     /* Clamp to target so the last step never overshoots. */
@@ -84,9 +86,9 @@ static void ramp_step(struct k_work *work) {
 }
 
 static int on_activity_state_changed(const zmk_event_t *eh) {
-    const struct zmk_activity_state_changed *ev =
-        as_zmk_activity_state_changed(eh);
-    if (!ev) return ZMK_EV_EVENT_BUBBLE;
+    const struct zmk_activity_state_changed *ev = as_zmk_activity_state_changed(eh);
+    if (!ev)
+        return ZMK_EV_EVENT_BUBBLE;
 
     switch (ev->state) {
     case ZMK_ACTIVITY_ACTIVE:

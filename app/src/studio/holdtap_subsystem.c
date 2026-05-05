@@ -37,12 +37,14 @@ static const struct device *resolve_behavior(uint32_t behavior_id) {
  * fork keeps this struct exposed via the header below — see
  * include/zmk/behavior_hold_tap.h in this fork's branch. */
 static struct behavior_hold_tap_config *holdtap_config_for(const struct device *dev) {
-    if (!dev) return NULL;
+    if (!dev)
+        return NULL;
     /* Compare against the symbol the hold-tap driver registers. The
      * symbol is defined in behavior_hold_tap.c and exposed via the
      * fork header. */
     extern const struct behavior_driver_api behavior_hold_tap_driver_api;
-    if (dev->api != &behavior_hold_tap_driver_api) return NULL;
+    if (dev->api != &behavior_hold_tap_driver_api)
+        return NULL;
     /* Driver config is const-cast safe because the editor request comes
      * over an authenticated RPC channel. We checkpoint via settings on
      * save so a power cycle reverts to the flashed copy. */
@@ -55,8 +57,7 @@ zmk_studio_Response get_holdtap_params(const zmk_studio_Request *req) {
     uint32_t bid = req->subsystem.behaviors.request_type.get_holdtap_params.behavior_id;
     LOG_DBG("get_holdtap_params id=%u", bid);
 
-    zmk_behaviors_GetHoldTapParamsResponse resp =
-        zmk_behaviors_GetHoldTapParamsResponse_init_zero;
+    zmk_behaviors_GetHoldTapParamsResponse resp = zmk_behaviors_GetHoldTapParamsResponse_init_zero;
 
     const struct device *dev = resolve_behavior(bid);
     if (!dev) {
@@ -84,8 +85,7 @@ zmk_studio_Response get_holdtap_params(const zmk_studio_Request *req) {
     size_t n = MIN(cfg->hold_trigger_key_positions_len,
                    ARRAY_SIZE(resp.result.ok.hold_trigger_key_positions));
     for (size_t i = 0; i < n; i++) {
-        resp.result.ok.hold_trigger_key_positions[i] =
-            cfg->hold_trigger_key_positions[i];
+        resp.result.ok.hold_trigger_key_positions[i] = cfg->hold_trigger_key_positions[i];
     }
     resp.result.ok.hold_trigger_key_positions_count = n;
 
@@ -95,11 +95,10 @@ zmk_studio_Response get_holdtap_params(const zmk_studio_Request *req) {
 zmk_studio_Response set_holdtap_params(const zmk_studio_Request *req) {
     const zmk_behaviors_SetHoldTapParamsRequest *r =
         &req->subsystem.behaviors.request_type.set_holdtap_params;
-    LOG_DBG("set_holdtap_params id=%u flavor=%d term=%u",
-            r->behavior_id, r->params.flavor, r->params.tapping_term_ms);
+    LOG_DBG("set_holdtap_params id=%u flavor=%d term=%u", r->behavior_id, r->params.flavor,
+            r->params.tapping_term_ms);
 
-    zmk_behaviors_SetHoldTapParamsResponse resp =
-        zmk_behaviors_SetHoldTapParamsResponse_init_zero;
+    zmk_behaviors_SetHoldTapParamsResponse resp = zmk_behaviors_SetHoldTapParamsResponse_init_zero;
 
     const struct device *dev = resolve_behavior(r->behavior_id);
     if (!dev) {
@@ -118,14 +117,12 @@ zmk_studio_Response set_holdtap_params(const zmk_studio_Request *req) {
         resp.result = zmk_behaviors_HoldTapErrorCode_HOLDTAP_ERR_INVALID_PARAMETERS;
         return BEHAVIOR_RESPONSE(set_holdtap_params, resp);
     }
-    if (r->params.tapping_term_ms > 2000 ||
-        r->params.quick_tap_ms > 1000 ||
+    if (r->params.tapping_term_ms > 2000 || r->params.quick_tap_ms > 1000 ||
         r->params.require_prior_idle_ms > 1000) {
         resp.result = zmk_behaviors_HoldTapErrorCode_HOLDTAP_ERR_INVALID_PARAMETERS;
         return BEHAVIOR_RESPONSE(set_holdtap_params, resp);
     }
-    if (r->params.hold_trigger_key_positions_count >
-        ARRAY_SIZE(cfg->hold_trigger_key_positions)) {
+    if (r->params.hold_trigger_key_positions_count > ARRAY_SIZE(cfg->hold_trigger_key_positions)) {
         resp.result = zmk_behaviors_HoldTapErrorCode_HOLDTAP_ERR_INVALID_PARAMETERS;
         return BEHAVIOR_RESPONSE(set_holdtap_params, resp);
     }
@@ -136,16 +133,15 @@ zmk_studio_Response set_holdtap_params(const zmk_studio_Request *req) {
      * has to take the lock the driver already maintains for its
      * undecided list. */
     cfg->flavor = (uint8_t)r->params.flavor;
-    if (r->params.tapping_term_ms > 0) cfg->tapping_term_ms = r->params.tapping_term_ms;
+    if (r->params.tapping_term_ms > 0)
+        cfg->tapping_term_ms = r->params.tapping_term_ms;
     cfg->quick_tap_ms = r->params.quick_tap_ms;
     cfg->require_prior_idle_ms = r->params.require_prior_idle_ms;
     cfg->hold_trigger_on_release = r->params.hold_trigger_on_release;
     for (size_t i = 0; i < r->params.hold_trigger_key_positions_count; i++) {
-        cfg->hold_trigger_key_positions[i] =
-            r->params.hold_trigger_key_positions[i];
+        cfg->hold_trigger_key_positions[i] = r->params.hold_trigger_key_positions[i];
     }
-    cfg->hold_trigger_key_positions_len =
-        r->params.hold_trigger_key_positions_count;
+    cfg->hold_trigger_key_positions_len = r->params.hold_trigger_key_positions_count;
 
     resp.result = zmk_behaviors_HoldTapErrorCode_HOLDTAP_ERR_OK;
     return BEHAVIOR_RESPONSE(set_holdtap_params, resp);
