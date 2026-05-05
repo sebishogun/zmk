@@ -27,4 +27,6 @@ int zmk_rgb_underglow_change_sat(int direction);
 int zmk_rgb_underglow_change_brt(int direction);
 int zmk_rgb_underglow_change_spd(int direction);
 int zmk_rgb_underglow_set_hsb(struct zmk_led_hsb color);
+int zmk_rgb_underglow_set_brightness(uint8_t brightness);
+uint8_t zmk_rgb_underglow_calc_effective_brightness(void);
 int zmk_rgb_underglow_status(void);

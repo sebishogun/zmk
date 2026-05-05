@@ -504,6 +504,22 @@ int zmk_rgb_underglow_set_hsb(struct zmk_led_hsb color) {
     return 0;
 }
 
+// Sets brightness as a percentage (0..100) without persisting. Used by
+// the AuroraKey idle dimmer to ramp brightness up/down on activity
+// transitions while preserving the user's saved baseline.
+int zmk_rgb_underglow_set_brightness(uint8_t brightness) {
+    if (brightness > BRT_MAX) {
+        brightness = BRT_MAX;
+    }
+    state.color.b = brightness;
+    return 0;
+}
+
+// Returns the current effective brightness as a percentage (0..100).
+// Idle dimmer uses this as the live baseline before ramping toward the
+// idle floor and reads it again to restore on activity wake.
+uint8_t zmk_rgb_underglow_calc_effective_brightness(void) { return state.color.b; }
+
 struct zmk_led_hsb zmk_rgb_underglow_calc_hue(int direction) {
     struct zmk_led_hsb color = state.color;
 
