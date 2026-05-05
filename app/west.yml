@@ -41,7 +41,7 @@ manifest:
       path: modules/lib/gui/lvgl
       remote: zmkfirmware
     - name: zmk-studio-messages
-      revision: 79e9baf6f1b1430a5273de27ba9941494071cbd0 # proto/live-mutation-rpcs-rebased (rgb FT_CALLBACK + RPC IDs 100..103)
+      revision: fb420b661c83c1cf213f3c2d654f736cb5a2df84 # proto/live-mutation-rpcs-rebased + behaviors.options for fixed-size MacroSlot
       path: modules/msgs/zmk-studio-messages
       remote: sebishogun
   group-filter: [+optional]
