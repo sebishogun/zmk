@@ -109,6 +109,69 @@ config ZMK_STUDIO_RPC_TX_BUF_SIZE
     int "TX Buffer Size"
     default 64
 
+# AuroraKey live-USB mutation extensions. Each is opt-in so an upstream
+# ZMK build that doesn't pull these in stays the same byte-for-byte. The
+# proto wire IDs are 100..199 (reserved range in behaviors.proto) so an
+# editor that doesn't understand them silently rejects unknown oneofs.
+
+menuconfig ZMK_STUDIO_HOLDTAP_MUTATION
+    bool "AuroraKey: live hold-tap parameter mutation"
+    depends on BEHAVIOR_HOLD_TAP
+    default n
+    help
+      Adds get_holdtap_params / set_holdtap_params RPC handlers that
+      patch a hold-tap behavior's runtime config (flavor, term, qt,
+      prior-idle, htor, position gate). Edits are RAM-only until
+      zmk.keymap.save_changes flushes them to NVS.
+
+menuconfig ZMK_STUDIO_MACRO_SLOT_POOL
+    bool "AuroraKey: live macro-slot pool"
+    depends on ZMK_BEHAVIOR_MACRO
+    default n
+    help
+      Reserves a fixed pool of empty zmk,behavior-slot-macro instances
+      at boot. Editor pushes bindings into a slot at runtime via
+      list_macro_slots / set_macro_slot, and references the slot from
+      a keymap binding (`&slot_macro N`).
+
+if ZMK_STUDIO_MACRO_SLOT_POOL
+
+config ZMK_STUDIO_MACRO_SLOT_COUNT
+    int "Slot count"
+    default 8
+    range 1 32
+
+config ZMK_STUDIO_MACRO_SLOT_BINDINGS_MAX
+    int "Max bindings per slot"
+    default 16
+    range 2 32
+
+endif
+
+menuconfig ZMK_STUDIO_IDLE_DIMMER
+    bool "AuroraKey: idle-driven RGB brightness ramp"
+    depends on ZMK_RGB_UNDERGLOW
+    default n
+    help
+      Smoothly ramps RGB brightness down after CONFIG_ZMK_IDLE_TIMEOUT
+      and back up on the next activity event. Avoids the hard on/off
+      flash of CONFIG_ZMK_RGB_UNDERGLOW_AUTO_OFF_IDLE while still
+      saving battery.
+
+if ZMK_STUDIO_IDLE_DIMMER
+
+config ZMK_STUDIO_IDLE_DIMMER_FLOOR_PCT
+    int "Floor brightness (0..100)"
+    default 10
+    range 0 99
+
+config ZMK_STUDIO_IDLE_DIMMER_RAMP_MS
+    int "Ramp duration in ms"
+    default 800
+    range 100 5000
+
+endif
+
 endif
 
 endif

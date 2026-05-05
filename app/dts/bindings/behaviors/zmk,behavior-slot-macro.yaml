@@ -1,0 +1,24 @@
+# AuroraKey runtime-mutable macro slot. Behaves like
+# zmk,behavior-macro at use-site but its bindings live in writable
+# RAM and are populated over the studio RPC channel
+# (zmk.behaviors.set_macro_slot). Reference from a keymap as
+# `&slot_macro N` where N selects which slot to fire (0..SLOT_COUNT-1).
+#
+# Copyright (c) 2026 The ZMK Contributors / AuroraKey
+# SPDX-License-Identifier: MIT
+
+description: AuroraKey runtime-mutable macro slot
+
+compatible: "zmk,behavior-slot-macro"
+
+include: zero_param.yaml
+
+properties:
+  "#binding-cells":
+    type: int
+    required: true
+    const: 1
+    description: |
+      Slot index. The single param at use-time selects which mutable
+      slot fires. Slot count is set by CONFIG_ZMK_STUDIO_MACRO_SLOT_COUNT
+      (default 8). 1-cell binding so the keymap reads as `&slot_macro 0`.

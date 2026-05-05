@@ -16,3 +16,10 @@ target_sources(app PRIVATE keymap_subsystem.c)
 target_sources_ifdef(CONFIG_ZMK_RGB_UNDERGLOW app PRIVATE rgb_subsystem.c)
 target_sources_ifdef(CONFIG_ZMK_STUDIO_TRANSPORT_UART app PRIVATE uart_rpc_transport.c)
 target_sources_ifdef(CONFIG_ZMK_STUDIO_TRANSPORT_BLE app PRIVATE gatt_rpc_transport.c)
+
+# AuroraKey live-USB mutation extensions. Each handler file is gated
+# on its own Kconfig symbol so disabling a feature drops the file
+# entirely from the build — no dead handlers, no stack growth.
+target_sources_ifdef(CONFIG_ZMK_STUDIO_HOLDTAP_MUTATION app PRIVATE holdtap_subsystem.c)
+target_sources_ifdef(CONFIG_ZMK_STUDIO_MACRO_SLOT_POOL app PRIVATE macro_slot_subsystem.c)
+target_sources_ifdef(CONFIG_ZMK_STUDIO_IDLE_DIMMER app PRIVATE idle_dimmer.c)
