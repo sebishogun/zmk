@@ -40,8 +40,6 @@ typedef zmk_studio_Response(rpc_func)(const zmk_studio_Request *neq);
  */
 struct zmk_rpc_subsystem {
     subsystem_func *func;
-    uint16_t handlers_start_index;
-    uint16_t handlers_end_index;
     uint8_t subsystem_choice;
 };
 

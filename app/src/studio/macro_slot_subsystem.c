@@ -78,23 +78,6 @@ zmk_studio_Response set_macro_slot(const zmk_studio_Request *req) {
     LOG_INF("set_macro_slot idx=%u bindings_count=%u wait=%u tap=%u", r->index, r->bindings_count,
             r->wait_ms, r->tap_ms);
 
-    /* DEBUG SHORT-CIRCUIT — re-armed after mutex fix landed but RPC
-     * timeouts persisted. If push works with this stub returning OK
-     * without touching the slot pool → the issue is in the validation
-     * or zmk_slot_macro_set call below. If push STILL times out → the
-     * issue is upstream (request decode in rpc_main, dispatch routing,
-     * response encode for SetMacroSlotResponse, or USB CDC transport).
-     * Either result narrows the search dramatically.
-     *
-     * Drop this block (and the duplicate `resp` decl below) once the
-     * actual culprit is found. */
-    {
-        zmk_behaviors_SetMacroSlotResponse stub_resp = zmk_behaviors_SetMacroSlotResponse_init_zero;
-        stub_resp.result = zmk_behaviors_MacroSlotErrorCode_MACRO_SLOT_ERR_OK;
-        LOG_INF("set_macro_slot DEBUG-STUB-2 returning OK without write");
-        return BEHAVIOR_RESPONSE(set_macro_slot, stub_resp);
-    }
-
     zmk_behaviors_SetMacroSlotResponse resp = zmk_behaviors_SetMacroSlotResponse_init_zero;
 
     if (r->index >= SLOT_COUNT) {

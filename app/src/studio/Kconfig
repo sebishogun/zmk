@@ -143,8 +143,8 @@ config ZMK_STUDIO_MACRO_SLOT_COUNT
 
 config ZMK_STUDIO_MACRO_SLOT_BINDINGS_MAX
     int "Max bindings per slot"
-    default 16
-    range 2 32
+    default 64
+    range 2 64
 
 endif
 

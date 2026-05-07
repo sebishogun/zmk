@@ -39,9 +39,27 @@ zmk_studio_Response zmk_rpc_subsystem_delegate_to_subs(const struct zmk_rpc_subs
                                                        uint8_t which_req) {
     LOG_DBG("Got subsystem func for %d", subsys->subsystem_choice);
 
-    for (int i = subsys->handlers_start_index; i <= subsys->handlers_end_index; i++) {
-        struct zmk_rpc_subsystem_handler *sub_handler;
-        STRUCT_SECTION_GET(zmk_rpc_subsystem_handler, i, &sub_handler);
+    /* Walk every registered handler, filtering by subsystem + request
+     * tag. Replaces the prior `[handlers_start_index, handlers_end_index]`
+     * range walk, which silently lost handlers when the iterable section
+     * was not contiguous-by-subsystem. The ranges are computed in
+     * zmk_rpc_init by detecting subsystem transitions in section order;
+     * because target_sources interleaves files registering the same
+     * subsystem (behavior_subsystem.c + holdtap_subsystem.c +
+     * macro_slot_subsystem.c all register handlers under `behaviors`,
+     * sandwiched around core_subsystem.c / keymap_subsystem.c / rgb_*),
+     * each re-entry into a subsystem overwrote its earlier start_index
+     * and only the LAST contiguous block was reachable. The dispatcher
+     * fell through to RPC_NOT_FOUND for the lost handlers — a meta
+     * error that the editor's protobuf.js decoder couldn't surface
+     * cleanly, so the UI saw a timeout rather than a clean error.
+     *
+     * Linear scan of ~20 handlers is free (microseconds) and obviates
+     * the indexing entirely. */
+    STRUCT_SECTION_FOREACH(zmk_rpc_subsystem_handler, sub_handler) {
+        if (sub_handler->subsystem_choice != subsys->subsystem_choice) {
+            continue;
+        }
         if (sub_handler->request_choice == which_req) {
             if (sub_handler->security == ZMK_STUDIO_RPC_HANDLER_SECURED &&
                 zmk_studio_core_get_lock_state() != ZMK_STUDIO_CORE_LOCK_STATE_UNLOCKED) {
@@ -289,32 +307,6 @@ exit_refresh:
 }
 
 static int zmk_rpc_init(void) {
-    int prev_choice = -1;
-    struct zmk_rpc_subsystem *prev_sub = NULL;
-    int i = 0;
-
-    STRUCT_SECTION_FOREACH(zmk_rpc_subsystem_handler, handler) {
-        struct zmk_rpc_subsystem *sub = find_subsystem_for_choice(handler->subsystem_choice);
-
-        __ASSERT(sub != NULL, "RPC Handler for unknown subsystem choice %d",
-                 handler->subsystem_choice);
-
-        if (prev_choice < 0) {
-            sub->handlers_start_index = i;
-        } else if ((prev_choice != handler->subsystem_choice) && prev_sub) {
-            prev_sub->handlers_end_index = i - 1;
-            sub->handlers_start_index = i;
-        }
-
-        prev_choice = handler->subsystem_choice;
-        prev_sub = sub;
-        i++;
-    }
-
-    if (prev_sub) {
-        prev_sub->handlers_end_index = i - 1;
-    }
-
     refresh_selected_transport();
 
     return 0;

@@ -28,7 +28,12 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * the keymap subsystem uses; lifted here so we don't pull a fat header
  * into the public API. Returns NULL when the id isn't registered. */
 static const struct device *resolve_behavior(uint32_t behavior_id) {
-    return zmk_behavior_get_binding(behavior_id);
+    const char *behavior_name = zmk_behavior_find_behavior_name_from_local_id(behavior_id);
+    if (!behavior_name) {
+        return NULL;
+    }
+
+    return zmk_behavior_get_binding(behavior_name);
 }
 
 /* Extract the mutable hold-tap config struct from a device. We accept
