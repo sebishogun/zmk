@@ -110,8 +110,23 @@ static int on_slot_macro_pressed(struct zmk_behavior_binding *binding,
 
     for (size_t i = 0; i < n; i++) {
         struct zmk_slot_macro_binding *b = &slot_storage[slot_idx].bindings[i];
+        /* The slot stores the studio local id (uint32). Resolve it to
+         * the behavior NAME (const char *) — that's what the queue +
+         * dispatch chain key off (`behavior_dev` is a string). The
+         * earlier code passed the int straight to
+         * `zmk_behavior_get_binding`, which expects a string, then
+         * cast the returned `const struct device *` back to `const
+         * char *` and stuffed THAT into `.behavior_dev`. Result was
+         * an inner binding pointing at a struct device's first byte
+         * being interpreted as a character — runtime garbage. */
+        const char *behavior_name = zmk_behavior_find_behavior_name_from_local_id(b->behavior_id);
+        if (!behavior_name) {
+            LOG_ERR("slot %u: binding[%zu] has unresolved behavior_id=%u — skipping", slot_idx, i,
+                    b->behavior_id);
+            continue;
+        }
         struct zmk_behavior_binding inner = {
-            .behavior_dev = (const char *)zmk_behavior_get_binding(b->behavior_id),
+            .behavior_dev = behavior_name,
             .param1 = b->param1,
             .param2 = b->param2,
         };

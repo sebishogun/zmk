@@ -17,6 +17,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <pb_encode.h>
 #include <pb_decode.h>
 #include <zephyr/device.h>
+#include <zmk/behavior.h>
 #include <zmk/studio/rpc.h>
 #include <zmk/behavior_slot_macro.h>
 
@@ -74,23 +75,37 @@ zmk_studio_Response list_macro_slots(const zmk_studio_Request *req) {
 zmk_studio_Response set_macro_slot(const zmk_studio_Request *req) {
     const zmk_behaviors_SetMacroSlotRequest *r =
         &req->subsystem.behaviors.request_type.set_macro_slot;
-    LOG_DBG("set_macro_slot idx=%u bindings=%u", r->index, r->bindings_count);
+    LOG_INF("set_macro_slot idx=%u bindings_count=%u wait=%u tap=%u", r->index, r->bindings_count,
+            r->wait_ms, r->tap_ms);
 
     zmk_behaviors_SetMacroSlotResponse resp = zmk_behaviors_SetMacroSlotResponse_init_zero;
 
     if (r->index >= SLOT_COUNT) {
+        LOG_WRN("set_macro_slot: index %u >= SLOT_COUNT=%u", r->index, SLOT_COUNT);
         resp.result = zmk_behaviors_MacroSlotErrorCode_MACRO_SLOT_ERR_INVALID_INDEX;
         return BEHAVIOR_RESPONSE(set_macro_slot, resp);
     }
     if (r->bindings_count > BINDINGS_MAX) {
+        LOG_WRN("set_macro_slot: bindings_count %u > BINDINGS_MAX=%u", r->bindings_count,
+                BINDINGS_MAX);
         resp.result = zmk_behaviors_MacroSlotErrorCode_MACRO_SLOT_ERR_TOO_MANY_BINDINGS;
         return BEHAVIOR_RESPONSE(set_macro_slot, resp);
     }
-    /* Validate every inner behavior_id resolves before mutating —
-     * partial writes leave the slot in a usable state but reject the
-     * request as a whole if any binding is bad. */
+    /* Validate every inner behavior_id resolves before mutating. The
+     * proto's behavior_id is the studio local id (uint32) — the same
+     * space `zmk_behavior_get_local_id(name)` returns. Resolve via
+     * `zmk_behavior_find_behavior_name_from_local_id` (string) and
+     * then look up the device. Calling `zmk_behavior_get_binding` with
+     * the raw uint32 was the original bug: it expects a `const char *`
+     * (behavior name), so the int got reinterpreted as a pointer →
+     * compile warning + runtime garbage-deref → handler hung → editor
+     * RPC timeout. */
     for (size_t i = 0; i < r->bindings_count; i++) {
-        if (!zmk_behavior_get_binding(r->bindings[i].behavior_id)) {
+        const char *behavior_name =
+            zmk_behavior_find_behavior_name_from_local_id(r->bindings[i].behavior_id);
+        if (!behavior_name || !zmk_behavior_get_binding(behavior_name)) {
+            LOG_WRN("set_macro_slot: binding[%zu].behavior_id=%u doesn't resolve", i,
+                    r->bindings[i].behavior_id);
             resp.result = zmk_behaviors_MacroSlotErrorCode_MACRO_SLOT_ERR_INVALID_INNER_BEHAVIOR;
             return BEHAVIOR_RESPONSE(set_macro_slot, resp);
         }
@@ -103,6 +118,7 @@ zmk_studio_Response set_macro_slot(const zmk_studio_Request *req) {
         new_bindings[i].param2 = r->bindings[i].param2;
     }
     int rc = zmk_slot_macro_set(r->index, new_bindings, r->bindings_count, r->wait_ms, r->tap_ms);
+    LOG_INF("set_macro_slot idx=%u rc=%d -> %s", r->index, rc, rc == 0 ? "OK" : "GENERIC");
     resp.result = (rc == 0) ? zmk_behaviors_MacroSlotErrorCode_MACRO_SLOT_ERR_OK
                             : zmk_behaviors_MacroSlotErrorCode_MACRO_SLOT_ERR_GENERIC;
     return BEHAVIOR_RESPONSE(set_macro_slot, resp);
