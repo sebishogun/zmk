@@ -75,29 +75,8 @@ zmk_studio_Response list_macro_slots(const zmk_studio_Request *req) {
 zmk_studio_Response set_macro_slot(const zmk_studio_Request *req) {
     const zmk_behaviors_SetMacroSlotRequest *r =
         &req->subsystem.behaviors.request_type.set_macro_slot;
-    LOG_INF("set_macro_slot ENTRY idx=%u bindings_count=%u wait=%u tap=%u", r->index,
-            r->bindings_count, r->wait_ms, r->tap_ms);
-
-    /* DEBUG SHORT-CIRCUIT — returns success without touching the slot
-     * pool. Bisects "is the handler dispatching + response getting
-     * back to the editor?" from "is the handler hanging mid-body?".
-     *
-     *   Editor sees OK after this lands → dispatch is fine; the
-     *     timeout came from this function's prior body. We then
-     *     incrementally re-add steps (validation loop, copy, set)
-     *     until we find which step was hanging.
-     *   Editor still times out → the issue is upstream of this
-     *     function (request decode, dispatch routing, response
-     *     encode, or transport). Move the search there.
-     *
-     * Revert by restoring the validation + copy + zmk_slot_macro_set
-     * call below; the original logic is intact past the early-return. */
-    {
-        zmk_behaviors_SetMacroSlotResponse stub_resp = zmk_behaviors_SetMacroSlotResponse_init_zero;
-        stub_resp.result = zmk_behaviors_MacroSlotErrorCode_MACRO_SLOT_ERR_OK;
-        LOG_INF("set_macro_slot DEBUG-STUB returning OK without write");
-        return BEHAVIOR_RESPONSE(set_macro_slot, stub_resp);
-    }
+    LOG_INF("set_macro_slot idx=%u bindings_count=%u wait=%u tap=%u", r->index, r->bindings_count,
+            r->wait_ms, r->tap_ms);
 
     zmk_behaviors_SetMacroSlotResponse resp = zmk_behaviors_SetMacroSlotResponse_init_zero;
 

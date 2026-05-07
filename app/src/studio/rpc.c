@@ -199,6 +199,15 @@ static int send_response(const zmk_studio_Response *resp) {
 #if !IS_ENABLED(CONFIG_NANOPB_NO_ERRMSG)
         LOG_ERR("Failed to encode the message %s", stream.errmsg);
 #endif // !IS_ENABLED(CONFIG_NANOPB_NO_ERRMSG)
+        /* IMPORTANT: unlock before returning. The original early-return
+         * leaked rpc_transport_mutex, so any single pb_encode failure
+         * (e.g. a malformed response struct, an encode-callback that
+         * exhausted the tx ring) wedged every subsequent RPC call —
+         * the next send_response would block forever in
+         * k_mutex_lock(K_FOREVER), which the editor sees as RPC
+         * timeout. Power-cycling the keyboard cleared it; nothing
+         * short of that did. Fall through to the unlock at `exit:`. */
+        k_mutex_unlock(&rpc_transport_mutex);
         return -EINVAL;
     }
 
