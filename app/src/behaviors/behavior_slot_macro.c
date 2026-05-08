@@ -146,6 +146,9 @@ static int on_slot_macro_released(struct zmk_behavior_binding *binding,
 static const struct behavior_driver_api behavior_slot_macro_driver_api = {
     .binding_pressed = on_slot_macro_pressed,
     .binding_released = on_slot_macro_released,
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
+    .get_parameter_metadata = zmk_behavior_get_empty_param_metadata,
+#endif
 };
 
 static int behavior_slot_macro_init(const struct device *dev) {
