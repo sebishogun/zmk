@@ -147,10 +147,31 @@ static const struct behavior_driver_api behavior_slot_macro_driver_api = {
     .binding_pressed = on_slot_macro_pressed,
     .binding_released = on_slot_macro_released,
 #if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
-    .get_parameter_metadata = zmk_behavior_get_empty_param_metadata,
+    .parameter_metadata = &metadata,
 #endif
 };
 
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
+static const struct behavior_parameter_value_metadata param1_values[] = {
+    {
+        .type = BEHAVIOR_PARAMETER_VALUE_TYPE_RANGE,
+        .range = {
+            .min = 0,
+            .max = CONFIG_ZMK_STUDIO_MACRO_SLOT_COUNT - 1,
+        },
+    },
+};
+
+static const struct behavior_parameter_metadata_set param_metadata_set[] = {{
+    .param1_values = param1_values,
+    .param1_values_len = ARRAY_SIZE(param1_values),
+}};
+
+static const struct behavior_parameter_metadata metadata = {
+    .sets_len = ARRAY_SIZE(param_metadata_set),
+    .sets = param_metadata_set,
+};
+#endif
 static int behavior_slot_macro_init(const struct device *dev) {
     ARG_UNUSED(dev);
     /* Initialise state pointers so zmk_slot_macro_get works before
