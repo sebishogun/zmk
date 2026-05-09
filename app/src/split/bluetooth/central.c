@@ -559,9 +559,18 @@ K_WORK_DEFINE(update_peripherals_selected_layouts_work,
  * user manually nudges brightness. */
 static void rgb_underglow_split_resync_handler(struct k_work *work) {
     ARG_UNUSED(work);
+    LOG_INF("post-discovery underglow resync firing");
     zmk_rgb_underglow_resync_split_peripheral();
 }
+/* Multi-shot resync: 250ms covers fast discovery, 2s covers slower BLE
+ * pairing on first connect, 5s is the safety net for laggy peripherals.
+ * Idempotent — broadcasting the same state twice is harmless. Cheap (3
+ * × ~7-byte writes per peripheral connect). */
 static K_WORK_DELAYABLE_DEFINE(rgb_underglow_split_resync_work, rgb_underglow_split_resync_handler);
+static K_WORK_DELAYABLE_DEFINE(rgb_underglow_split_resync_work_2s,
+                               rgb_underglow_split_resync_handler);
+static K_WORK_DELAYABLE_DEFINE(rgb_underglow_split_resync_work_5s,
+                               rgb_underglow_split_resync_handler);
 #endif // IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
 
 static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
@@ -660,14 +669,15 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
             slot->update_rgb_color_handle = bt_gatt_attr_value_handle(attr);
         } else if (!bt_uuid_cmp(((struct bt_gatt_chrc *)attr->user_data)->uuid,
                                 BT_UUID_DECLARE_128(ZMK_SPLIT_BT_UPDATE_UNDERGLOW_STATE_UUID))) {
-            LOG_DBG("Found update underglow state handle");
+            LOG_INF("Found update underglow state handle");
             slot->update_underglow_state_handle = bt_gatt_attr_value_handle(attr);
-            /* Push current local state once the peripheral's char is mapped.
-             * 250 ms delay lets the GATT subscription chain settle (the
-             * earlier handles are still completing at this point — the
-             * write itself is fire-and-forget so a rare miss is OK; the
-             * next user-driven brightness/effect change will resync). */
+            /* Multi-shot post-discovery resync: 250ms covers fast
+             * discovery, 2s and 5s catch slower BLE pairing / re-sub
+             * cases. Each shot re-broadcasts the central's full
+             * underglow state. Idempotent. */
             k_work_schedule(&rgb_underglow_split_resync_work, K_MSEC(250));
+            k_work_schedule(&rgb_underglow_split_resync_work_2s, K_MSEC(2000));
+            k_work_schedule(&rgb_underglow_split_resync_work_5s, K_MSEC(5000));
 #endif
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
         } else if (!bt_uuid_cmp(((struct bt_gatt_chrc *)attr->user_data)->uuid,
@@ -750,12 +760,7 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
     // attribute list. Handle stays 0, layer-sync writes silently dropped.
     subscribed = subscribed && slot->update_layers_handle;
     subscribed = subscribed && slot->update_rgb_color_handle;
-    /* update_underglow_state_handle intentionally NOT in this gate. A peripheral
-     * running older firmware (pre-state-sync) won't have the char registered,
-     * so requiring it would hang `subscribed` at false forever and brick the
-     * split connection entirely. Per-call sites at the broadcast path skip
-     * cleanly when the handle is 0 (mirrors how update_rgb_color does that
-     * in split_central_split_run_callback). */
+    subscribed = subscribed && slot->update_underglow_state_handle;
 #endif // IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
     subscribed = subscribed && slot->batt_lvl_subscribe_params.value_handle;
@@ -769,7 +774,18 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
     }
 #endif // IS_ENABLED(CONFIG_ZMK_INPUT_SPLIT)
 
-    return subscribed ? BT_GATT_ITER_STOP : BT_GATT_ITER_CONTINUE;
+    /* Always continue iterating until the BLE stack passes attr==NULL
+     * (handled at the top of this callback). Returning STOP early on
+     * `subscribed` skipped chars that come AFTER the last gated handle
+     * in the service attribute list — the new UPDATE_UNDERGLOW_STATE
+     * char (declared last in service.c::BT_GATT_SERVICE_DEFINE) was
+     * never visited, so its handle stayed 0 and every per-mutation +
+     * post-discovery resync write hit the safety guard at the
+     * SET_UNDERGLOW_STATE send case in split_central_split_run_callback
+     * and silently broke central → peripheral RGB-state sync. Walking
+     * the full ~9 chars instead of stopping at 8 costs microseconds
+     * per discovery (one-shot per peripheral connect). */
+    return BT_GATT_ITER_CONTINUE;
 }
 
 static uint8_t split_central_service_discovery_func(struct bt_conn *conn,
@@ -1218,17 +1234,26 @@ void split_central_split_run_callback(struct k_work *work) {
             break;
         }
         case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_UNDERGLOW_STATE: {
-            if (peripherals[payload_wrapper.source].update_underglow_state_handle == 0) {
-                /* Peripheral predates the state-sync feature — broadcast
-                 * is a no-op for that half. Don't error; the layer-state
-                 * + per-key RGB sync still work. */
-                LOG_DBG("Peripheral %d has no underglow state handle, skipping",
+            uint16_t handle = peripherals[payload_wrapper.source].update_underglow_state_handle;
+            LOG_INF("SET_UNDERGLOW_STATE: peripheral=%d handle=%u "
+                    "h=%u s=%u b=%u on=%u eff=%u spd=%u",
+                    payload_wrapper.source, handle, payload_wrapper.cmd.data.set_underglow_state.h,
+                    payload_wrapper.cmd.data.set_underglow_state.s,
+                    payload_wrapper.cmd.data.set_underglow_state.b,
+                    payload_wrapper.cmd.data.set_underglow_state.on,
+                    payload_wrapper.cmd.data.set_underglow_state.current_effect,
+                    payload_wrapper.cmd.data.set_underglow_state.animation_speed);
+            if (handle == 0) {
+                /* Handle stayed 0 — peripheral didn't register the char,
+                 * OR central's discovery hasn't reached it yet. Either
+                 * way the write would fail. Logged at INF so a regression
+                 * of the discovery-walker bug surfaces in dmesg. */
+                LOG_WRN("SET_UNDERGLOW_STATE: handle=0 on peripheral %d, skipping",
                         payload_wrapper.source);
                 break;
             }
             int state_err = bt_gatt_write_without_response(
-                peripherals[payload_wrapper.source].conn,
-                peripherals[payload_wrapper.source].update_underglow_state_handle,
+                peripherals[payload_wrapper.source].conn, handle,
                 &payload_wrapper.cmd.data.set_underglow_state,
                 sizeof(payload_wrapper.cmd.data.set_underglow_state), true);
             if (state_err) {

@@ -244,7 +244,7 @@ struct split_underglow_state_payload {
 static struct split_underglow_state_payload pending_underglow_state;
 
 static void split_svc_update_underglow_state_callback(struct k_work *work) {
-    LOG_DBG("Applying underglow state: h=%u s=%u b=%u on=%u eff=%u spd=%u",
+    LOG_INF("applying remote underglow state h=%u s=%u b=%u on=%u eff=%u spd=%u",
             pending_underglow_state.h, pending_underglow_state.s, pending_underglow_state.b,
             pending_underglow_state.on, pending_underglow_state.current_effect,
             pending_underglow_state.animation_speed);

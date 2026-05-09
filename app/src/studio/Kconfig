@@ -186,3 +186,18 @@ endif
 endif
 
 endif
+
+# AuroraKey: force ZMK to honour the configured Sleep timeout even when
+# USB is the active power source. Upstream ZMK gates the SLEEP transition
+# on `!is_usb_power_present()` in app/src/activity.c::activity_work_handler
+# — useful when wall-powered should mean "always responsive", but
+# unhelpful for users on a docked laptop who want battery-saver behaviour
+# regardless of plug state, or for testing the sleep path. When this
+# option is on, the USB-presence gate is bypassed and Sleep fires after
+# CONFIG_ZMK_IDLE_SLEEP_TIMEOUT regardless of power source. Default off
+# so vanilla ZMK behaviour stays unchanged unless the workspace's editor
+# toggles "Sleep even when USB-powered".
+config AURORAKEY_FORCE_SLEEP_ON_USB
+    bool "AuroraKey: enforce Sleep timeout even on USB power"
+    depends on ZMK_SLEEP
+    default n

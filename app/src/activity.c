@@ -75,7 +75,18 @@ void activity_work_handler(struct k_work *work) {
     int32_t current = k_uptime_get();
     int32_t inactive_time = current - activity_last_uptime;
 #if IS_ENABLED(CONFIG_ZMK_SLEEP)
-    if (inactive_time > MAX_SLEEP_MS && !is_usb_power_present()) {
+    /* AuroraKey: upstream ZMK suppresses sleep when USB is the active
+     * power source ("wall-powered = always responsive"). For users on
+     * docked laptops who want the configured Sleep timeout to apply
+     * regardless, CONFIG_AURORAKEY_FORCE_SLEEP_ON_USB makes the USB
+     * presence check a no-op. Default is OFF so vanilla ZMK behaviour
+     * stays the same byte-for-byte when the workspace doesn't tick the
+     * "Sleep even when USB-powered" toggle in the editor. */
+    bool usb_blocks_sleep = is_usb_power_present();
+#if IS_ENABLED(CONFIG_AURORAKEY_FORCE_SLEEP_ON_USB)
+    usb_blocks_sleep = false;
+#endif
+    if (inactive_time > MAX_SLEEP_MS && !usb_blocks_sleep) {
         // Put devices in suspend power mode before sleeping
         set_state(ZMK_ACTIVITY_SLEEP);
 
