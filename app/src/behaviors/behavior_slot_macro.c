@@ -25,6 +25,7 @@
 #include <zephyr/device.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
+#include <string.h>
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(behavior_slot_macro, CONFIG_ZMK_LOG_LEVEL);
 
@@ -82,13 +83,68 @@ int zmk_slot_macro_set(size_t index, const struct zmk_slot_macro_binding *bindin
     return 0;
 }
 
-/* The behavior driver — one instance, parametrised by slot index in
- * binding param1. */
+/* The behavior driver — slot index is derived from the device-instance
+ * name ("slot_macro_<N>"), NOT from binding->param1. Trusting param1
+ * meant a stale or hand-edited binding like `&slot_macro_1 0` would
+ * dispatch slot 0 from a device that's bound to slot 1's identity —
+ * silently firing the wrong macro. With one device instance per slot
+ * (see EmitSlotMacroDTS at internal/zmk/slot_macro.go) the device
+ * itself unambiguously identifies the slot; param1 just carries
+ * historical compatibility from when there was a single instance.
+ * Param1 is now an OPTIONAL override: if the keymap ever sets a value
+ * different from the device's index AND in range, that wins (gives
+ * us a back-door for "fire slot N from any device" workflows without
+ * regressing the default identity-based dispatch). */
+static int slot_idx_from_dev_name(const char *name) {
+    /* Expected form: "slot_macro_<N>" — anything else returns -1.
+     * `zmk_behavior_get_local_id` and the cache layer share this same
+     * naming convention, so a mismatch here means the keymap is
+     * referencing a non-slot device through this driver, which is
+     * a build-time impossibility unless someone wired DT directly. */
+    if (!name)
+        return -1;
+    static const char prefix[] = "slot_macro_";
+    size_t plen = sizeof(prefix) - 1;
+    if (strncmp(name, prefix, plen) != 0)
+        return -1;
+    const char *p = name + plen;
+    if (*p == '\0')
+        return -1;
+    int n = 0;
+    while (*p) {
+        if (*p < '0' || *p > '9')
+            return -1;
+        n = n * 10 + (*p - '0');
+        if (n >= SLOT_COUNT)
+            return -1;
+        p++;
+    }
+    return n;
+}
+
 static int on_slot_macro_pressed(struct zmk_behavior_binding *binding,
                                  struct zmk_behavior_binding_event event) {
-    uint32_t slot_idx = binding->param1;
+    int dev_slot = slot_idx_from_dev_name(binding->behavior_dev);
+    uint32_t slot_idx;
+    if (dev_slot >= 0) {
+        slot_idx = (uint32_t)dev_slot;
+        /* If the keymap explicitly named a different in-range slot via
+         * param1, honour the override. Out-of-range param1 is treated
+         * as "no override" rather than an error — old keymaps with
+         * param1=0 against a non-zero device fall through to the
+         * device's own slot, which is what fixes the historical
+         * `&slot_macro_1 0` → fired slot 0 bug. */
+        if (binding->param1 != slot_idx && binding->param1 < SLOT_COUNT && binding->param1 != 0) {
+            slot_idx = binding->param1;
+        }
+    } else {
+        /* Pre-instance keymap or hand-rolled DT — fall back to the
+         * legacy param1-as-index behaviour. */
+        slot_idx = binding->param1;
+    }
     if (slot_idx >= SLOT_COUNT) {
-        LOG_ERR("slot %u out of range", slot_idx);
+        LOG_ERR("slot %u out of range (dev=%s param1=%u)", slot_idx,
+                binding->behavior_dev ? binding->behavior_dev : "?", binding->param1);
         return -EINVAL;
     }
     /* Snapshot the slot — if the editor pushes new bindings while
