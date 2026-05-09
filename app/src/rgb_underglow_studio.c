@@ -39,6 +39,9 @@ static inline bool mask_get(const uint8_t *mask, uint32_t key) {
 static inline void mask_set(uint8_t *mask, uint32_t key) {
     mask[key / 8] |= (uint8_t)(1u << (key % 8));
 }
+static inline void mask_clear_one(uint8_t *mask, uint32_t key) {
+    mask[key / 8] &= (uint8_t) ~(1u << (key % 8));
+}
 static inline void mask_clear_all(uint8_t *mask) { memset(mask, 0, MASK_BYTES); }
 
 /* Resolve a Studio-side persistent layer_id → runtime index by scanning the
@@ -198,4 +201,62 @@ static int rgb_settings_set(const char *name, size_t len, settings_read_cb read_
     return 0;
 }
 
-SETTINGS_STATIC_HANDLER_DEFINE(rgb_studio, "rgb", NULL, rgb_settings_set, NULL, NULL);
+/* h_commit fires after settings_load has filled live_colors[][] and
+ * live_set_mask[][] from NVS. Without this reconciliation, a Studio
+ * "Save changes" RPC permanently pins those keys' colours: every
+ * subsequent firmware flash with a new DT-defined per-key colour map
+ * is silently overridden on boot because the renderer's
+ * studio_lookup() consults live_colors[] BEFORE falling through to
+ * the DT bindings. NVS isn't wiped on UF2 flash (preserved by design,
+ * same as BLE bonds), so the override outlives every code update.
+ *
+ * Strategy: walk the committed live overlay; for each set bit,
+ * compare live_colors[L][K] against the current DT-baked binding's
+ * param1 (which is the 0xEERRGGBB encoding the editor's codegen
+ * emits). If they differ, the user has flashed a new colour for that
+ * key and clearly intends it to take effect — drop the live mask bit
+ * so DT wins on render. Pending overlays from the active USB session
+ * still apply (pending_set_mask is checked first in studio_lookup),
+ * so live editing during this boot continues to work; only the
+ * committed-from-a-previous-firmware lock is cleared.
+ *
+ * Persists the reconciled mask back to NVS so the cleanup is one-shot
+ * per flash; subsequent boots see the cleared state and skip cleanly. */
+static int rgb_settings_commit(void) {
+    bool dirty = false;
+    for (int l = 0; l < LAYERS; l++) {
+        const struct zmk_behavior_binding *bindings = rgb_underglow_get_bindings((uint8_t)l);
+        if (bindings == NULL) {
+            continue;
+        }
+        for (uint32_t k = 0; k < KEYS; k++) {
+            if (!mask_get(live_set_mask[l], k)) {
+                continue;
+            }
+            uint32_t dts_color = bindings[k].param1;
+            if (live_colors[l][k] != dts_color) {
+                LOG_DBG("rgb_studio: clearing stale live overlay layer=%d key=%u "
+                        "(live=0x%08x dts=0x%08x)",
+                        l, k, live_colors[l][k], dts_color);
+                live_colors[l][k] = 0;
+                mask_clear_one(live_set_mask[l], k);
+                dirty = true;
+            }
+        }
+    }
+    if (dirty) {
+        int rc = settings_save_one("rgb/colors", live_colors, sizeof(live_colors));
+        if (!rc) {
+            rc = settings_save_one("rgb/mask", live_set_mask, sizeof(live_set_mask));
+        }
+        if (rc) {
+            LOG_ERR("rgb_studio: failed to persist reconciled overlay (%d)", rc);
+        } else {
+            LOG_INF("rgb_studio: reconciled stale live overlay against DT bindings");
+        }
+    }
+    return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(rgb_studio, "rgb", NULL, rgb_settings_set, rgb_settings_commit,
+                               NULL);
