@@ -236,9 +236,23 @@ static int rgb_settings_set(const char *name, size_t len, settings_read_cb read_
 /* Walk the DT-baked rgbmap and CRC the param1 of every binding. Result
  * is stable across reboots of the same firmware build and changes
  * whenever the editor's codegen emits a different per-key colour map.
- * Cheap: single linear pass, ~LAYERS × KEYS × 4 bytes hashed. */
+ * Cheap: single linear pass, ~LAYERS × KEYS × 4 bytes hashed.
+ *
+ * Gated on CONFIG_EXPERIMENTAL_RGB_LAYER because rgb_underglow_get_bindings
+ * is only LINKED when that feature is on (rgb_underglow_layer.c is gated
+ * by `target_sources_ifdef(CONFIG_EXPERIMENTAL_RGB_LAYER ...)` in
+ * app/CMakeLists.txt). When the feature is off there are no DT-baked
+ * per-key bindings to fingerprint, and the renderer never consults
+ * studio_lookup, so returning 0 is the right stub: the commit handler
+ * sees no per-key state to reconcile and stays a no-op. Without this
+ * gate the prebuild step in the docker builder Dockerfile fails to
+ * link with `undefined reference to rgb_underglow_get_bindings`,
+ * silently leaving the docker image stuck at the previously-cached
+ * build — every workspace UF2 produced afterwards lacks the per-key
+ * NVS reconcile we're trying to ship. */
 static uint32_t compute_dts_crc(void) {
     uint32_t crc = 0;
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
     int layers_with = 0, layers_without = 0;
     for (int l = 0; l < LAYERS; l++) {
         const struct zmk_behavior_binding *bindings = rgb_underglow_get_bindings((uint8_t)l);
@@ -255,6 +269,7 @@ static uint32_t compute_dts_crc(void) {
     LOG_INF("rgb_studio: compute_dts_crc → 0x%08x (layers_with=%d layers_without=%d, LAYERS=%d "
             "KEYS=%d)",
             crc, layers_with, layers_without, (int)LAYERS, (int)KEYS);
+#endif
     return crc;
 }
 
