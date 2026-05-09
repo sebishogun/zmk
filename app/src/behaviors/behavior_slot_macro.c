@@ -149,14 +149,12 @@ static int on_slot_macro_released(struct zmk_behavior_binding *binding,
     return ZMK_BEHAVIOR_OPAQUE;
 }
 
-static const struct behavior_driver_api behavior_slot_macro_driver_api = {
-    .binding_pressed = on_slot_macro_pressed,
-    .binding_released = on_slot_macro_released,
-#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
-    .parameter_metadata = &metadata,
-#endif
-};
-
+/* Parameter metadata tables — declared BEFORE behavior_slot_macro_driver_api
+ * because the driver_api initializer references &metadata. C11 doesn't
+ * allow forward references to file-scope statics in initializer
+ * expressions, so the previous order (driver_api first, metadata after)
+ * failed to compile under -Wfatal-errors with: "'metadata' undeclared
+ * here (not in a function)". */
 #if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
 static const struct behavior_parameter_value_metadata param1_values[] = {
     {
@@ -179,6 +177,14 @@ static const struct behavior_parameter_metadata metadata = {
     .sets = param_metadata_set,
 };
 #endif
+
+static const struct behavior_driver_api behavior_slot_macro_driver_api = {
+    .binding_pressed = on_slot_macro_pressed,
+    .binding_released = on_slot_macro_released,
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
+    .parameter_metadata = &metadata,
+#endif
+};
 static int behavior_slot_macro_init(const struct device *dev) {
     ARG_UNUSED(dev);
     /* Initialise state pointers so zmk_slot_macro_get works before
