@@ -12,6 +12,14 @@
  *                                  ACTIVE → schedule ramp-up
  *   - the work_delayable cycle handles intermediate steps
  *
+ * Split-keyboard caveat: this file is gated on ZMK_SPLIT_ROLE_CENTRAL
+ * (see Kconfig `depends on`). Peripheral halves never run a second
+ * listener — central drives the ramp locally and broadcasts every
+ * step to the peripheral via the underglow-state split transport so
+ * both halves stay in lock-step. Without that gate, peripheral activity
+ * timers would fire independently and the two halves would ramp out
+ * of phase.
+ *
  * Copyright (c) 2026 The ZMK Contributors / AuroraKey
  * SPDX-License-Identifier: MIT
  */
@@ -24,6 +32,7 @@ LOG_MODULE_REGISTER(idle_dimmer, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/events/activity_state_changed.h>
 #include <zmk/rgb_underglow.h>
 #include <zmk/activity.h>
+#include <zmk/studio/idle_dimmer.h>
 
 #if IS_ENABLED(CONFIG_ZMK_STUDIO_IDLE_DIMMER)
 
@@ -35,10 +44,12 @@ LOG_MODULE_REGISTER(idle_dimmer, CONFIG_ZMK_LOG_LEVEL);
 #define STEPS 16
 #define STEP_INTERVAL (RAMP_MS / STEPS)
 
-/* Brightness anchor — captured at boot from the live config so the
- * "active" target tracks whatever the user actually chose, not a
- * hardcoded default. Refreshed each time we leave idle so a brightness
- * change *during* idle is honoured on wake. */
+/* Sentinel for "not yet anchored". Anchor lazily on the first IDLE
+ * event so settings_load() (called from main() AFTER all SYS_INIT
+ * handlers fire) has populated state.color.b with the user's saved
+ * baseline. Without this lazy step the eager-init seed would capture
+ * CONFIG_ZMK_RGB_UNDERGLOW_BRT_START (e.g. 100) and ramp back to that
+ * on every wake — clobbering the user's saved 50% within seconds. */
 static uint8_t active_target_pct = 0;
 static uint8_t current_pct = 0;
 static enum {
@@ -46,6 +57,15 @@ static enum {
     DIRECTION_DOWN,
     DIRECTION_UP,
 } ramp_direction = DIRECTION_NONE;
+
+/* Set true while ramp_step is calling zmk_rgb_underglow_save_state's
+ * notify chain on its own write. Lets the notify hook distinguish
+ * dimmer-driven brightness writes from user-driven ones — only the
+ * latter should re-anchor active_target_pct. Unused today because
+ * ramp_step calls set_brightness (which doesn't trigger save_state's
+ * notify path), but kept ready for any future caller that wraps the
+ * ramp's write through save_state. */
+static bool dimmer_owns_write = false;
 
 static void ramp_step(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(ramp_work, ramp_step);
@@ -76,13 +96,37 @@ static void ramp_step(struct k_work *work) {
         next = target;
     }
     current_pct = (uint8_t)next;
+
+    dimmer_owns_write = true;
     zmk_rgb_underglow_set_brightness((uint8_t)current_pct);
+    dimmer_owns_write = false;
 
     if (current_pct != target) {
         k_work_schedule(&ramp_work, K_MSEC(STEP_INTERVAL));
     } else {
         ramp_direction = DIRECTION_NONE;
     }
+}
+
+void zmk_rgb_idle_dimmer_notify_user_brightness(uint8_t new_pct) {
+    /* Skip our own ramp's writes — those drive `current_pct` already
+     * and would otherwise feed back into active_target_pct, dragging
+     * the wake target down to the floor. */
+    if (dimmer_owns_write) {
+        return;
+    }
+    /* Mid-ramp: don't disturb the in-flight ramp. The next IDLE event
+     * re-anchors from the post-ramp baseline (which now includes the
+     * user's change because state.color.b is the source of truth). */
+    if (ramp_direction != DIRECTION_NONE) {
+        return;
+    }
+    /* User changed brightness while settled at the active target: the
+     * new value IS the new active target. Sync both anchors so the
+     * next IDLE→ACTIVE ramp targets it. */
+    active_target_pct = new_pct;
+    current_pct = new_pct;
+    LOG_DBG("active brightness re-anchored to %u%%", new_pct);
 }
 
 static int on_activity_state_changed(const zmk_event_t *eh) {
@@ -95,16 +139,27 @@ static int on_activity_state_changed(const zmk_event_t *eh) {
         if (ramp_direction == DIRECTION_NONE && current_pct == active_target_pct) {
             return ZMK_EV_EVENT_BUBBLE; /* nothing to do */
         }
+        /* If we never hit IDLE before the first ACTIVE event (boot is
+         * ACTIVE; first transition is ACTIVE→IDLE so this branch only
+         * fires after at least one round-trip), active_target_pct is
+         * already valid. */
         ramp_direction = DIRECTION_UP;
         k_work_schedule(&ramp_work, K_NO_WAIT);
         break;
     case ZMK_ACTIVITY_IDLE:
     case ZMK_ACTIVITY_SLEEP:
-        /* Capture the active brightness so we know what to ramp back
-         * to. Only re-cache when we're actually at the active target
-         * — mid-ramp captures would freeze the target at an
-         * intermediate value. */
-        if (ramp_direction == DIRECTION_NONE) {
+        /* Lazy anchor — first time we hit idle, capture the user's
+         * post-settings_load brightness as the wake target. */
+        if (active_target_pct == 0) {
+            uint8_t live = zmk_rgb_underglow_calc_effective_brightness();
+            active_target_pct = (live > FLOOR_PCT) ? live : 100;
+            current_pct = live > 0 ? live : active_target_pct;
+            LOG_DBG("first-IDLE anchor: target=%u%% live=%u%%", active_target_pct, live);
+        } else if (ramp_direction == DIRECTION_NONE) {
+            /* Re-anchor on subsequent idles in case user changed brightness
+             * via a path that didn't fire the notify hook (defence in depth).
+             * Mid-ramp captures would freeze at an intermediate value, hence
+             * the DIRECTION_NONE guard. */
             uint8_t live = zmk_rgb_underglow_calc_effective_brightness();
             if (live > FLOOR_PCT) {
                 active_target_pct = live;
@@ -120,16 +175,5 @@ static int on_activity_state_changed(const zmk_event_t *eh) {
 
 ZMK_LISTENER(idle_dimmer, on_activity_state_changed);
 ZMK_SUBSCRIPTION(idle_dimmer, zmk_activity_state_changed);
-
-static int idle_dimmer_init(void) {
-    /* Seed both anchors from the live config. ZMK boots with idle
-     * state ACTIVE, so we never enter ramp_step before this callback
-     * has run. */
-    uint8_t boot = zmk_rgb_underglow_calc_effective_brightness();
-    active_target_pct = boot;
-    current_pct = boot;
-    return 0;
-}
-SYS_INIT(idle_dimmer_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
 #endif /* CONFIG_ZMK_STUDIO_IDLE_DIMMER */

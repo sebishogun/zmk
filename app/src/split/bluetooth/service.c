@@ -132,6 +132,7 @@ static ssize_t split_svc_select_phys_layout(struct bt_conn *conn, const struct b
 
 #if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
 #include <zmk/split/peripheral_layers.h>
+#include <zmk/rgb_underglow.h>
 #include <zmk/rgb_underglow_layer.h>
 
 /* Active-layer bitmap received from central. Raised as an event so the
@@ -223,6 +224,48 @@ static ssize_t split_svc_update_rgb_color(struct bt_conn *conn, const struct bt_
     k_work_submit(&split_svc_update_rgb_color_work);
     return len;
 }
+
+/* Underglow state mirror from central. Wire payload matches
+ * struct set_underglow_state in transport/types.h: 7 bytes packed —
+ * h:u16 + s:u8 + b:u8 + on:u8 + current_effect:u8 + animation_speed:u8.
+ * Stored to a pending struct + work-deferred apply because the GATT
+ * write happens in BT thread context; calling into rgb_underglow.c
+ * (which schedules its own work) from there is safer with one
+ * indirection. */
+struct split_underglow_state_payload {
+    uint16_t h;
+    uint8_t s;
+    uint8_t b;
+    uint8_t on;
+    uint8_t current_effect;
+    uint8_t animation_speed;
+} __packed;
+
+static struct split_underglow_state_payload pending_underglow_state;
+
+static void split_svc_update_underglow_state_callback(struct k_work *work) {
+    LOG_DBG("Applying underglow state: h=%u s=%u b=%u on=%u eff=%u spd=%u",
+            pending_underglow_state.h, pending_underglow_state.s, pending_underglow_state.b,
+            pending_underglow_state.on, pending_underglow_state.current_effect,
+            pending_underglow_state.animation_speed);
+    zmk_rgb_underglow_apply_remote_state(
+        pending_underglow_state.h, pending_underglow_state.s, pending_underglow_state.b,
+        pending_underglow_state.on != 0, pending_underglow_state.current_effect,
+        pending_underglow_state.animation_speed);
+}
+static K_WORK_DEFINE(split_svc_update_underglow_state_work,
+                     split_svc_update_underglow_state_callback);
+
+static ssize_t split_svc_update_underglow_state(struct bt_conn *conn,
+                                                const struct bt_gatt_attr *attr, const void *buf,
+                                                uint16_t len, uint16_t offset, uint8_t flags) {
+    if (offset + len > sizeof(pending_underglow_state)) {
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+    }
+    memcpy((uint8_t *)&pending_underglow_state + offset, buf, len);
+    k_work_submit(&split_svc_update_underglow_state_work);
+    return len;
+}
 #endif // CONFIG_EXPERIMENTAL_RGB_LAYER
 
 static ssize_t split_svc_get_selected_phys_layout(struct bt_conn *conn,
@@ -311,6 +354,9 @@ BT_GATT_SERVICE_DEFINE(
     BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(ZMK_SPLIT_BT_UPDATE_RGB_COLOR_UUID),
                            BT_GATT_CHRC_WRITE_WITHOUT_RESP, BT_GATT_PERM_WRITE_ENCRYPT, NULL,
                            split_svc_update_rgb_color, NULL),
+    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(ZMK_SPLIT_BT_UPDATE_UNDERGLOW_STATE_UUID),
+                           BT_GATT_CHRC_WRITE_WITHOUT_RESP, BT_GATT_PERM_WRITE_ENCRYPT, NULL,
+                           split_svc_update_underglow_state, NULL),
 #endif
 );
 

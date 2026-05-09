@@ -22,6 +22,10 @@
 #include <zmk/events/hid_indicators_changed.h>
 #endif
 
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+#include <zmk/rgb_underglow.h>
+#endif
+
 #include <zephyr/init.h>
 #include <zephyr/logging/log.h>
 
@@ -64,6 +68,19 @@ int zmk_split_transport_peripheral_command_handler(
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_HID_INDICATORS: {
         return raise_zmk_hid_indicators_changed((struct zmk_hid_indicators_changed){
             .indicators = cmd.data.set_hid_indicators.indicators});
+    }
+#endif
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+    case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_UNDERGLOW_STATE: {
+        /* Mirror central's underglow state. Wired-split path; the
+         * BLE-split path goes through bluetooth/service.c's dedicated
+         * GATT char handler instead so this case never fires there.
+         * Either way the call ends up at the same setter. */
+        return zmk_rgb_underglow_apply_remote_state(
+            cmd.data.set_underglow_state.h, cmd.data.set_underglow_state.s,
+            cmd.data.set_underglow_state.b, cmd.data.set_underglow_state.on != 0,
+            cmd.data.set_underglow_state.current_effect,
+            cmd.data.set_underglow_state.animation_speed);
     }
 #endif
     default:

@@ -34,6 +34,10 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/hid_indicators_types.h>
 #include <zmk/physical_layouts.h>
 
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+#include <zmk/rgb_underglow.h>
+#endif
+
 static int start_scanning(void);
 
 #define POSITION_STATE_DATA_LEN 16
@@ -62,6 +66,7 @@ struct peripheral_slot {
 #if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
     uint16_t update_layers_handle;
     uint16_t update_rgb_color_handle;
+    uint16_t update_underglow_state_handle;
 #endif
     uint16_t selected_physical_layout_handle;
     uint8_t position_state[POSITION_STATE_DATA_LEN];
@@ -226,6 +231,7 @@ int release_peripheral_slot(int index) {
 #if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
     slot->update_layers_handle = 0;
     slot->update_rgb_color_handle = 0;
+    slot->update_underglow_state_handle = 0;
 #endif
 
     return 0;
@@ -543,6 +549,22 @@ static void update_peripherals_selected_physical_layout(struct k_work *_work) {
 K_WORK_DEFINE(update_peripherals_selected_layouts_work,
               update_peripherals_selected_physical_layout);
 
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+/* One-shot post-discovery resync of the underglow state from central to
+ * the freshly-connected peripheral. Fires K_MSEC(250) after the
+ * UPDATE_UNDERGLOW_STATE characteristic is found so the GATT attribute
+ * cache is fully primed before we issue the write — bt_gatt_write
+ * against an unsubscribed handle returns -ENOTCONN otherwise. Without
+ * this push, RH boots at CONFIG_ZMK_RGB_UNDERGLOW_BRT_START until the
+ * user manually nudges brightness. */
+static void rgb_underglow_split_resync_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+    zmk_rgb_underglow_resync_split_peripheral();
+}
+static K_WORK_DELAYABLE_DEFINE(rgb_underglow_split_resync_work,
+                               rgb_underglow_split_resync_handler);
+#endif // IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+
 static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
                                                  const struct bt_gatt_attr *attr,
                                                  struct bt_gatt_discover_params *params) {
@@ -637,6 +659,16 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
                                 BT_UUID_DECLARE_128(ZMK_SPLIT_BT_UPDATE_RGB_COLOR_UUID))) {
             LOG_DBG("Found update RGB color handle");
             slot->update_rgb_color_handle = bt_gatt_attr_value_handle(attr);
+        } else if (!bt_uuid_cmp(((struct bt_gatt_chrc *)attr->user_data)->uuid,
+                                BT_UUID_DECLARE_128(ZMK_SPLIT_BT_UPDATE_UNDERGLOW_STATE_UUID))) {
+            LOG_DBG("Found update underglow state handle");
+            slot->update_underglow_state_handle = bt_gatt_attr_value_handle(attr);
+            /* Push current local state once the peripheral's char is mapped.
+             * 250 ms delay lets the GATT subscription chain settle (the
+             * earlier handles are still completing at this point — the
+             * write itself is fire-and-forget so a rare miss is OK; the
+             * next user-driven brightness/effect change will resync). */
+            k_work_schedule(&rgb_underglow_split_resync_work, K_MSEC(250));
 #endif
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
         } else if (!bt_uuid_cmp(((struct bt_gatt_chrc *)attr->user_data)->uuid,
@@ -719,6 +751,12 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
     // attribute list. Handle stays 0, layer-sync writes silently dropped.
     subscribed = subscribed && slot->update_layers_handle;
     subscribed = subscribed && slot->update_rgb_color_handle;
+    /* update_underglow_state_handle intentionally NOT in this gate. A peripheral
+     * running older firmware (pre-state-sync) won't have the char registered,
+     * so requiring it would hang `subscribed` at false forever and brick the
+     * split connection entirely. Per-call sites at the broadcast path skip
+     * cleanly when the handle is 0 (mirrors how update_rgb_color does that
+     * in split_central_split_run_callback). */
 #endif // IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
     subscribed = subscribed && slot->batt_lvl_subscribe_params.value_handle;
@@ -1180,6 +1218,26 @@ void split_central_split_run_callback(struct k_work *work) {
                 sizeof(clear_buf), true);
             break;
         }
+        case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_UNDERGLOW_STATE: {
+            if (peripherals[payload_wrapper.source].update_underglow_state_handle == 0) {
+                /* Peripheral predates the state-sync feature — broadcast
+                 * is a no-op for that half. Don't error; the layer-state
+                 * + per-key RGB sync still work. */
+                LOG_DBG("Peripheral %d has no underglow state handle, skipping",
+                        payload_wrapper.source);
+                break;
+            }
+            int state_err = bt_gatt_write_without_response(
+                peripherals[payload_wrapper.source].conn,
+                peripherals[payload_wrapper.source].update_underglow_state_handle,
+                &payload_wrapper.cmd.data.set_underglow_state,
+                sizeof(payload_wrapper.cmd.data.set_underglow_state), true);
+            if (state_err) {
+                LOG_ERR("Failed to send underglow state to peripheral %d (err %d)",
+                        payload_wrapper.source, state_err);
+            }
+            break;
+        }
 #endif // IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
         default:
             LOG_WRN("Unsupported wrapped central command type %d", payload_wrapper.cmd.type);
@@ -1271,6 +1329,7 @@ static int split_central_bt_send_command(uint8_t source,
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_SAVE:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_DISCARD:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_CLEAR:
+    case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_UNDERGLOW_STATE:
 #endif
     {
         struct central_cmd_wrapper wrapper = {.source = source, .cmd = cmd};

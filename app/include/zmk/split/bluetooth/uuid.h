@@ -27,3 +27,9 @@
  * to peripheral so live-edit colors appear on both halves. 12-byte payload:
  * layer_id (u32) + key_pos (u32) + color (u32). Write-without-response. */
 #define ZMK_SPLIT_BT_UPDATE_RGB_COLOR_UUID ZMK_BT_SPLIT_UUID(0x00000008)
+/* AuroraKey: used by central to push the full underglow state (h/s/b/on/
+ * current_effect/animation_speed) so the peripheral mirrors whatever the
+ * user set/saved on the central. Fired on every change AND once after GATT
+ * discovery completes so RH catches up to LH on (re)connect. 7-byte payload
+ * matching set_underglow_state in transport/types.h. Write-without-response. */
+#define ZMK_SPLIT_BT_UPDATE_UNDERGLOW_STATE_UUID ZMK_BT_SPLIT_UUID(0x00000009)
