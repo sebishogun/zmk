@@ -46,7 +46,7 @@
 
 #include <zmk/studio/idle_dimmer.h>
 
-#if IS_ENABLED(CONFIG_ZMK_SPLIT) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) &&                    \
+#if IS_ENABLED(CONFIG_ZMK_SPLIT) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) &&                   \
     IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
 #include <zmk/split/central.h>
 #define HAS_RGB_STATE_BCAST 1

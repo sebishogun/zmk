@@ -34,8 +34,6 @@ void zmk_rgb_idle_dimmer_notify_user_brightness(uint8_t new_pct);
 
 #else /* !CONFIG_ZMK_STUDIO_IDLE_DIMMER */
 
-static inline void zmk_rgb_idle_dimmer_notify_user_brightness(uint8_t new_pct) {
-    (void)new_pct;
-}
+static inline void zmk_rgb_idle_dimmer_notify_user_brightness(uint8_t new_pct) { (void)new_pct; }
 
 #endif /* CONFIG_ZMK_STUDIO_IDLE_DIMMER */
