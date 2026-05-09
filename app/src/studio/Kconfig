@@ -151,12 +151,6 @@ endif
 menuconfig ZMK_STUDIO_IDLE_DIMMER
     bool "AuroraKey: idle-driven RGB brightness ramp"
     depends on ZMK_RGB_UNDERGLOW
-    # Mutually exclusive with stock auto-off — both subscribe to
-    # zmk_activity_state_changed; auto-off cuts EXT_POWER while we want
-    # the ramp to control brightness. Listener order is undefined so
-    # they race. Kconfig hard-rejects the combination at build time
-    # rather than letting the race silently flip behaviour per build.
-    depends on !ZMK_RGB_UNDERGLOW_AUTO_OFF_IDLE
     # Central-only on split keyboards. Peripheral mirrors brightness
     # via the underglow-state split transport (SET_UNDERGLOW_STATE in
     # app/src/split/central.c) — a peripheral-side listener would just
@@ -165,9 +159,15 @@ menuconfig ZMK_STUDIO_IDLE_DIMMER
     default n
     help
       Smoothly ramps RGB brightness down after CONFIG_ZMK_IDLE_TIMEOUT
-      and back up on the next activity event. Avoids the hard on/off
-      flash of CONFIG_ZMK_RGB_UNDERGLOW_AUTO_OFF_IDLE while still
-      saving battery.
+      and back up on the next activity event. Layers cleanly with
+      CONFIG_ZMK_RGB_UNDERGLOW_AUTO_OFF_IDLE: dimmer fires on the same
+      ZMK_ACTIVITY_IDLE event and ramps state.color.b toward the floor;
+      AUTO_OFF cuts EXT_POWER (LEDs go fully dark). For a "fade-then-
+      off" UX, additionally enable AURORAKEY_RGB_AUTO_OFF_DELAY_MS so
+      AUTO_OFF waits N ms after the IDLE event before cutting power —
+      the dimmer's ramp completes first, then the strip goes dark.
+      On wake (ACTIVE event) the chain reverses: AUTO_OFF restores
+      EXT_POWER instantly, dimmer ramps brightness back up.
 
 if ZMK_STUDIO_IDLE_DIMMER
 
@@ -201,3 +201,18 @@ config AURORAKEY_FORCE_SLEEP_ON_USB
     bool "AuroraKey: enforce Sleep timeout even on USB power"
     depends on ZMK_SLEEP
     default n
+
+# AuroraKey: optional delay between the ZMK_ACTIVITY_IDLE event firing
+# and ZMK_RGB_UNDERGLOW_AUTO_OFF_IDLE cutting EXT_POWER. Lets the editor
+# expose three independent timeouts:
+#   1. CONFIG_ZMK_IDLE_TIMEOUT      — when dimmer ramp starts
+#   2. + AURORAKEY_RGB_AUTO_OFF_DELAY_MS — when LEDs cut to off
+#   3. CONFIG_ZMK_IDLE_SLEEP_TIMEOUT — when MCU enters deep sleep
+# Set to 0 (default) to keep the upstream behaviour where AUTO_OFF cuts
+# power immediately on IDLE. Only takes effect when both
+# ZMK_RGB_UNDERGLOW_AUTO_OFF_IDLE=y and ZMK_RGB_UNDERGLOW=y.
+config AURORAKEY_RGB_AUTO_OFF_DELAY_MS
+    int "AuroraKey: delay (ms) between IDLE event and RGB cut"
+    depends on ZMK_RGB_UNDERGLOW && ZMK_RGB_UNDERGLOW_AUTO_OFF_IDLE
+    default 0
+    range 0 3600000

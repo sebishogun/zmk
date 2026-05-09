@@ -731,11 +731,43 @@ static int rgb_underglow_auto_state(bool target_wake_state) {
     }
 }
 
+#if IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_AUTO_OFF_IDLE) &&                                          \
+    (CONFIG_AURORAKEY_RGB_AUTO_OFF_DELAY_MS > 0)
+/* AuroraKey: deferred-cut work for "fade-then-off" UX. When the workspace
+ * conf has AURORAKEY_RGB_AUTO_OFF_DELAY_MS > 0, IDLE doesn't immediately
+ * cut EXT_POWER — we schedule a delayed work that fires the cut after the
+ * configured ms. Lets the dimmer's ramp complete first. ACTIVE event
+ * cancels the work AND restores power if it had already fired. */
+static void rgb_underglow_deferred_cut_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+    LOG_DBG("deferred AUTO_OFF: cutting EXT_POWER now");
+    rgb_underglow_auto_state(false);
+}
+static K_WORK_DELAYABLE_DEFINE(rgb_underglow_deferred_cut_work, rgb_underglow_deferred_cut_handler);
+#endif
+
 static int rgb_underglow_event_listener(const zmk_event_t *eh) {
 
 #if IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_AUTO_OFF_IDLE)
     if (as_zmk_activity_state_changed(eh)) {
-        return rgb_underglow_auto_state(zmk_activity_get_state() == ZMK_ACTIVITY_ACTIVE);
+        bool active = (zmk_activity_get_state() == ZMK_ACTIVITY_ACTIVE);
+#if CONFIG_AURORAKEY_RGB_AUTO_OFF_DELAY_MS > 0
+        if (active) {
+            /* Cancel any pending cut + restore RGB power if it already fired.
+             * Wake path: ACTIVE event arrives, work was either pending (cancel
+             * it) or already executed (rgb_underglow_auto_state restores). */
+            k_work_cancel_delayable(&rgb_underglow_deferred_cut_work);
+            return rgb_underglow_auto_state(true);
+        }
+        /* IDLE: schedule the cut for AURORAKEY_RGB_AUTO_OFF_DELAY_MS from now.
+         * If user toggles dim then RGB-off staggered (e.g. dim at 15s, RGB
+         * off at 60s = 45s delay), this is the 45s work. */
+        k_work_reschedule(&rgb_underglow_deferred_cut_work,
+                          K_MSEC(CONFIG_AURORAKEY_RGB_AUTO_OFF_DELAY_MS));
+        return 0;
+#else
+        return rgb_underglow_auto_state(active);
+#endif
     }
 #endif
 
