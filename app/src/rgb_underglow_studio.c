@@ -238,16 +238,22 @@ static int rgb_settings_set(const char *name, size_t len, settings_read_cb read_
  * Cheap: single linear pass, ~LAYERS × KEYS × 4 bytes hashed. */
 static uint32_t compute_dts_crc(void) {
     uint32_t crc = 0;
+    int layers_with = 0, layers_without = 0;
     for (int l = 0; l < LAYERS; l++) {
         const struct zmk_behavior_binding *bindings = rgb_underglow_get_bindings((uint8_t)l);
         if (bindings == NULL) {
+            layers_without++;
             continue;
         }
+        layers_with++;
         for (uint32_t k = 0; k < KEYS; k++) {
             uint32_t v = bindings[k].param1;
             crc = crc32_ieee_update(crc, (const uint8_t *)&v, sizeof(v));
         }
     }
+    LOG_INF("rgb_studio: compute_dts_crc → 0x%08x (layers_with=%d layers_without=%d, LAYERS=%d "
+            "KEYS=%d)",
+            crc, layers_with, layers_without, (int)LAYERS, (int)KEYS);
     return crc;
 }
 
@@ -271,12 +277,13 @@ static uint32_t compute_dts_crc(void) {
  * across the wipe. */
 static int rgb_settings_commit(void) {
     uint32_t expected_crc = compute_dts_crc();
+    LOG_INF("rgb_studio: commit fired (loaded_crc_present=%d loaded=0x%08x expected=0x%08x)",
+            (int)dts_crc_loaded, loaded_dts_crc, expected_crc);
     if (dts_crc_loaded && loaded_dts_crc == expected_crc) {
+        LOG_INF("rgb_studio: CRC match — keeping live overlay");
         return 0;
     }
-    LOG_INF("rgb_studio: DT bindings changed (loaded=0x%08x present=%d expected=0x%08x), wiping "
-            "per-key NVS overlay",
-            loaded_dts_crc, (int)dts_crc_loaded, expected_crc);
+    LOG_INF("rgb_studio: CRC mismatch — wiping per-key NVS overlay");
     memset(live_colors, 0, sizeof(live_colors));
     memset(live_set_mask, 0, sizeof(live_set_mask));
     memset(layer_transparent, 0, sizeof(layer_transparent));
