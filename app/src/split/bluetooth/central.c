@@ -66,7 +66,6 @@ struct peripheral_slot {
 #if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
     uint16_t update_layers_handle;
     uint16_t update_rgb_color_handle;
-    uint16_t update_underglow_state_handle;
 #endif
     uint16_t selected_physical_layout_handle;
     uint8_t position_state[POSITION_STATE_DATA_LEN];
@@ -231,7 +230,6 @@ int release_peripheral_slot(int index) {
 #if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
     slot->update_layers_handle = 0;
     slot->update_rgb_color_handle = 0;
-    slot->update_underglow_state_handle = 0;
 #endif
 
     return 0;
@@ -665,16 +663,14 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
             slot->update_layers_handle = bt_gatt_attr_value_handle(attr);
         } else if (!bt_uuid_cmp(((struct bt_gatt_chrc *)attr->user_data)->uuid,
                                 BT_UUID_DECLARE_128(ZMK_SPLIT_BT_UPDATE_RGB_COLOR_UUID))) {
-            LOG_DBG("Found update RGB color handle");
+            LOG_INF("Found update RGB color handle");
             slot->update_rgb_color_handle = bt_gatt_attr_value_handle(attr);
-        } else if (!bt_uuid_cmp(((struct bt_gatt_chrc *)attr->user_data)->uuid,
-                                BT_UUID_DECLARE_128(ZMK_SPLIT_BT_UPDATE_UNDERGLOW_STATE_UUID))) {
-            LOG_INF("Found update underglow state handle");
-            slot->update_underglow_state_handle = bt_gatt_attr_value_handle(attr);
-            /* Multi-shot post-discovery resync: 250ms covers fast
-             * discovery, 2s and 5s catch slower BLE pairing / re-sub
-             * cases. Each shot re-broadcasts the central's full
-             * underglow state. Idempotent. */
+            /* Underglow state piggybacks on this handle as opcode 0x05.
+             * Schedule a multi-shot post-discovery resync of the central's
+             * full underglow snapshot — 250 ms covers fast discovery, 2 s
+             * and 5 s catch slower BLE pairing / re-subscription cases.
+             * Idempotent. Without this, RH boots at BRT_START and stays
+             * there until the user nudges brightness. */
             k_work_schedule(&rgb_underglow_split_resync_work, K_MSEC(250));
             k_work_schedule(&rgb_underglow_split_resync_work_2s, K_MSEC(2000));
             k_work_schedule(&rgb_underglow_split_resync_work_5s, K_MSEC(5000));
@@ -756,11 +752,12 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
 #endif // IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
 #if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
     // Without this, discovery stops as soon as the other required handles are
-    // found — which happens BEFORE the update_layers char at the end of the
-    // attribute list. Handle stays 0, layer-sync writes silently dropped.
+    // found — which happens BEFORE the update_layers / update_rgb_color chars
+    // at the end of the attribute list. Handle stays 0, sync writes silently
+    // dropped. Underglow-state mirror piggybacks on update_rgb_color so it
+    // shares the same handle gate.
     subscribed = subscribed && slot->update_layers_handle;
     subscribed = subscribed && slot->update_rgb_color_handle;
-    subscribed = subscribed && slot->update_underglow_state_handle;
 #endif // IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
     subscribed = subscribed && slot->batt_lvl_subscribe_params.value_handle;
@@ -1234,28 +1231,36 @@ void split_central_split_run_callback(struct k_work *work) {
             break;
         }
         case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_UNDERGLOW_STATE: {
-            uint16_t handle = peripherals[payload_wrapper.source].update_underglow_state_handle;
-            LOG_INF("SET_UNDERGLOW_STATE: peripheral=%d handle=%u "
+            /* Piggyback opcode 0x05 on update_rgb_color. Carrying this
+             * over a dedicated GATT char would require central's bonded
+             * GATT cache to be invalidated whenever the firmware adds
+             * new chars (Service Changed indication is not enabled in
+             * ZMK), forcing a `&bt BT_CLR_ALL` after upgrade. The
+             * rgb_color handle has been stable across firmware revisions
+             * so it's already in every existing bond's cache. */
+            if (peripherals[payload_wrapper.source].update_rgb_color_handle == 0) {
+                LOG_WRN("SET_UNDERGLOW_STATE: rgb_color handle=0 on peripheral %d, skipping",
+                        payload_wrapper.source);
+                break;
+            }
+            uint8_t state_buf[1 + sizeof(payload_wrapper.cmd.data.set_underglow_state)];
+            state_buf[0] = 0x05; // opcode: set_underglow_state
+            memcpy(&state_buf[1], &payload_wrapper.cmd.data.set_underglow_state,
+                   sizeof(payload_wrapper.cmd.data.set_underglow_state));
+            LOG_INF("SET_UNDERGLOW_STATE: peripheral=%d via rgb_color handle=%u "
                     "h=%u s=%u b=%u on=%u eff=%u spd=%u",
-                    payload_wrapper.source, handle, payload_wrapper.cmd.data.set_underglow_state.h,
+                    payload_wrapper.source,
+                    peripherals[payload_wrapper.source].update_rgb_color_handle,
+                    payload_wrapper.cmd.data.set_underglow_state.h,
                     payload_wrapper.cmd.data.set_underglow_state.s,
                     payload_wrapper.cmd.data.set_underglow_state.b,
                     payload_wrapper.cmd.data.set_underglow_state.on,
                     payload_wrapper.cmd.data.set_underglow_state.current_effect,
                     payload_wrapper.cmd.data.set_underglow_state.animation_speed);
-            if (handle == 0) {
-                /* Handle stayed 0 — peripheral didn't register the char,
-                 * OR central's discovery hasn't reached it yet. Either
-                 * way the write would fail. Logged at INF so a regression
-                 * of the discovery-walker bug surfaces in dmesg. */
-                LOG_WRN("SET_UNDERGLOW_STATE: handle=0 on peripheral %d, skipping",
-                        payload_wrapper.source);
-                break;
-            }
             int state_err = bt_gatt_write_without_response(
-                peripherals[payload_wrapper.source].conn, handle,
-                &payload_wrapper.cmd.data.set_underglow_state,
-                sizeof(payload_wrapper.cmd.data.set_underglow_state), true);
+                peripherals[payload_wrapper.source].conn,
+                peripherals[payload_wrapper.source].update_rgb_color_handle, state_buf,
+                sizeof(state_buf), true);
             if (state_err) {
                 LOG_ERR("Failed to send underglow state to peripheral %d (err %d)",
                         payload_wrapper.source, state_err);
