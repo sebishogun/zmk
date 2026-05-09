@@ -14,6 +14,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
+#include <zephyr/sys/crc.h>
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #include <zmk/keymap.h>
@@ -33,14 +34,33 @@ static uint8_t pending_set_mask[LAYERS][MASK_BYTES];
 static uint8_t pending_transparent[LAYERS];
 static uint8_t pending_transparent_dirty[LAYERS];
 
+/* DTS-binding fingerprint used to detect "the per-key DT colours have
+ * changed since the last save, the NVS overlay is stale". CRC32 of the
+ * concatenated param1 fields of every DT-baked binding (which is the
+ * 0xEERRGGBB encoding the editor's codegen emits). On boot we compute
+ * the firmware's compiled-in fingerprint, compare to the one persisted
+ * in NVS the last time the wipe ran. Match → DT colours unchanged, the
+ * live overlay is authoritative across the reboot (Studio "Save changes"
+ * mid-session survives power-cycle, AND firmware flashes that didn't
+ * touch per-key colours preserve user commits). Mismatch → DT colours
+ * changed, NVS overlay is stale relative to the new bindings → wipe.
+ *
+ * Why CRC of bindings, not __DATE__/__TIME__: ccache keys object files
+ * by source hash + flags, stripping the time macros before hashing. Two
+ * compiles of the same source produce the same cached object → same
+ * timestamp baked in. So a build that only changed keymap.dts (NOT
+ * rgb_underglow_studio.c) would hit ccache and reuse the old timestamp
+ * — sentinel matches, no wipe, the per-key bug we're fixing recurs.
+ * Fingerprinting the actual DT data sidesteps the build-system layer
+ * entirely. */
+static uint32_t loaded_dts_crc;
+static bool dts_crc_loaded;
+
 static inline bool mask_get(const uint8_t *mask, uint32_t key) {
     return (mask[key / 8] >> (key % 8)) & 1u;
 }
 static inline void mask_set(uint8_t *mask, uint32_t key) {
     mask[key / 8] |= (uint8_t)(1u << (key % 8));
-}
-static inline void mask_clear_one(uint8_t *mask, uint32_t key) {
-    mask[key / 8] &= (uint8_t) ~(1u << (key % 8));
 }
 static inline void mask_clear_all(uint8_t *mask) { memset(mask, 0, MASK_BYTES); }
 
@@ -198,62 +218,88 @@ static int rgb_settings_set(const char *name, size_t len, settings_read_cb read_
         return read_cb(cb_arg, layer_transparent, MIN(len, sizeof(layer_transparent))) < 0 ? -EINVAL
                                                                                            : 0;
     }
+    if (settings_name_steq(name, "dts_crc", &next) && !next) {
+        if (len != sizeof(loaded_dts_crc)) {
+            /* Wrong-sized record → treat as missing; commit will wipe. */
+            return -EINVAL;
+        }
+        if (read_cb(cb_arg, &loaded_dts_crc, sizeof(loaded_dts_crc)) < 0) {
+            return -EINVAL;
+        }
+        dts_crc_loaded = true;
+        return 0;
+    }
     return 0;
 }
 
-/* h_commit fires after settings_load has filled live_colors[][] and
- * live_set_mask[][] from NVS. Without this reconciliation, a Studio
- * "Save changes" RPC permanently pins those keys' colours: every
- * subsequent firmware flash with a new DT-defined per-key colour map
- * is silently overridden on boot because the renderer's
- * studio_lookup() consults live_colors[] BEFORE falling through to
- * the DT bindings. NVS isn't wiped on UF2 flash (preserved by design,
- * same as BLE bonds), so the override outlives every code update.
- *
- * Strategy: walk the committed live overlay; for each set bit,
- * compare live_colors[L][K] against the current DT-baked binding's
- * param1 (which is the 0xEERRGGBB encoding the editor's codegen
- * emits). If they differ, the user has flashed a new colour for that
- * key and clearly intends it to take effect — drop the live mask bit
- * so DT wins on render. Pending overlays from the active USB session
- * still apply (pending_set_mask is checked first in studio_lookup),
- * so live editing during this boot continues to work; only the
- * committed-from-a-previous-firmware lock is cleared.
- *
- * Persists the reconciled mask back to NVS so the cleanup is one-shot
- * per flash; subsequent boots see the cleared state and skip cleanly. */
-static int rgb_settings_commit(void) {
-    bool dirty = false;
+/* Walk the DT-baked rgbmap and CRC the param1 of every binding. Result
+ * is stable across reboots of the same firmware build and changes
+ * whenever the editor's codegen emits a different per-key colour map.
+ * Cheap: single linear pass, ~LAYERS × KEYS × 4 bytes hashed. */
+static uint32_t compute_dts_crc(void) {
+    uint32_t crc = 0;
     for (int l = 0; l < LAYERS; l++) {
         const struct zmk_behavior_binding *bindings = rgb_underglow_get_bindings((uint8_t)l);
         if (bindings == NULL) {
             continue;
         }
         for (uint32_t k = 0; k < KEYS; k++) {
-            if (!mask_get(live_set_mask[l], k)) {
-                continue;
-            }
-            uint32_t dts_color = bindings[k].param1;
-            if (live_colors[l][k] != dts_color) {
-                LOG_DBG("rgb_studio: clearing stale live overlay layer=%d key=%u "
-                        "(live=0x%08x dts=0x%08x)",
-                        l, k, live_colors[l][k], dts_color);
-                live_colors[l][k] = 0;
-                mask_clear_one(live_set_mask[l], k);
-                dirty = true;
-            }
+            uint32_t v = bindings[k].param1;
+            crc = crc32_ieee_update(crc, (const uint8_t *)&v, sizeof(v));
         }
     }
-    if (dirty) {
-        int rc = settings_save_one("rgb/colors", live_colors, sizeof(live_colors));
-        if (!rc) {
-            rc = settings_save_one("rgb/mask", live_set_mask, sizeof(live_set_mask));
-        }
-        if (rc) {
-            LOG_ERR("rgb_studio: failed to persist reconciled overlay (%d)", rc);
-        } else {
-            LOG_INF("rgb_studio: reconciled stale live overlay against DT bindings");
-        }
+    return crc;
+}
+
+/* h_commit fires after settings_load has filled live_colors /
+ * live_set_mask / layer_transparent / loaded_dts_crc from NVS. Compute
+ * the firmware's DT-binding fingerprint (CRC of param1 across every
+ * baked-in binding); compare to the NVS-stored fingerprint from the
+ * last wipe. Match → DT colours unchanged, live overlay is
+ * authoritative across the reboot (Studio "Save changes" mid-session
+ * survives power-cycle, firmware flashes that touched non-RGB code
+ * also preserve user commits). Mismatch (or no record) → DT colours
+ * changed since the last save → wipe.
+ *
+ * Recovery semantics: on power loss mid-wipe, the dts_crc record is
+ * persisted LAST. If any earlier save fails or power drops before
+ * dts_crc lands, the next boot sees the same mismatch and re-runs the
+ * wipe. Idempotent.
+ *
+ * Scope: ONLY touches the rgb/ subtree. BLE bonds, keymap layer
+ * names, ext_power, backlight, behavior settings — all preserved
+ * across the wipe. */
+static int rgb_settings_commit(void) {
+    uint32_t expected_crc = compute_dts_crc();
+    if (dts_crc_loaded && loaded_dts_crc == expected_crc) {
+        return 0;
+    }
+    LOG_INF("rgb_studio: DT bindings changed (loaded=0x%08x present=%d expected=0x%08x), wiping "
+            "per-key NVS overlay",
+            loaded_dts_crc, (int)dts_crc_loaded, expected_crc);
+    memset(live_colors, 0, sizeof(live_colors));
+    memset(live_set_mask, 0, sizeof(live_set_mask));
+    memset(layer_transparent, 0, sizeof(layer_transparent));
+
+    int rc = settings_save_one("rgb/colors", live_colors, sizeof(live_colors));
+    if (!rc) {
+        rc = settings_save_one("rgb/mask", live_set_mask, sizeof(live_set_mask));
+    }
+    if (!rc) {
+        rc = settings_save_one("rgb/trans", layer_transparent, sizeof(layer_transparent));
+    }
+    if (!rc) {
+        /* Persist the fingerprint LAST so a power-loss mid-wipe leaves
+         * the system biased toward "still need to wipe" rather than
+         * "wipe complete but colours not yet cleared". */
+        rc = settings_save_one("rgb/dts_crc", &expected_crc, sizeof(expected_crc));
+    }
+    if (rc) {
+        LOG_ERR("rgb_studio: failed to persist wiped overlay (%d)", rc);
+    } else {
+        loaded_dts_crc = expected_crc;
+        dts_crc_loaded = true;
+        LOG_INF("rgb_studio: per-key NVS overlay wiped, fingerprint=0x%08x", expected_crc);
     }
     return 0;
 }
