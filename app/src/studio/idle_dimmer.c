@@ -121,6 +121,25 @@ void zmk_rgb_idle_dimmer_notify_user_brightness(uint8_t new_pct) {
     if (ramp_direction != DIRECTION_NONE) {
         return;
     }
+    /* Defensive: when CONFIG_ZMK_RGB_UNDERGLOW_AUTO_OFF_IDLE layers with
+     * the dimmer, AUTO_OFF's wake-up path calls zmk_rgb_underglow_on()
+     * which fires save_state() → this notify hook. At that moment
+     * state.color.b is still pinned at FLOOR_PCT because the dimmer
+     * ramped it down before AUTO_OFF cut EXT_POWER. If listener order
+     * happens to put AUTO_OFF before the dimmer's UP-ramp scheduling,
+     * ramp_direction is still NONE here — without this guard we'd
+     * anchor active_target_pct to FLOOR_PCT and the next ramp UP would
+     * target the floor instead of the user's saved brightness, leaving
+     * LEDs stuck dim after wake. User-driven brightness changes always
+     * go through change_brt/_hsb which clamp at BRT_MIN > FLOOR_PCT
+     * typically, so a "real" user write at <= FLOOR is vanishingly
+     * unlikely; skip the anchor and let the next IDLE event's
+     * re-anchor (which reads state.color.b too but only when
+     * ramp_direction == NONE AND live > FLOOR_PCT) pick up the
+     * post-wake value once the dimmer's UP ramp completes. */
+    if (new_pct <= FLOOR_PCT) {
+        return;
+    }
     /* User changed brightness while settled at the active target: the
      * new value IS the new active target. Sync both anchors so the
      * next IDLE→ACTIVE ramp targets it. */
