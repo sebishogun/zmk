@@ -330,8 +330,20 @@ static int rgb_settings_set(const char *name, size_t len, settings_read_cb read_
 
 SETTINGS_STATIC_HANDLER_DEFINE(rgb_underglow, "rgb/underglow", NULL, rgb_settings_set, NULL, NULL);
 
+/* Snapshot of `state` taken at save_state call time, with the dimmer's
+ * transient brightness override corrected back to the user-anchored
+ * value if applicable. Settings_save_one writes this snapshot, NOT
+ * `state` directly — without that the dimmer's ramped-down value
+ * (FLOOR_PCT) would land in NVS and the next cold-boot would load it
+ * back as the "saved" brightness, leaving the keyboard stuck dim
+ * after deep sleep. Snapshot taken at call time (synchronously) so
+ * any state mutations between then and the debounced save work are
+ * ignored — this matches the user's intent at the moment they (or
+ * the system path that called save_state) committed the change. */
+static struct rgb_underglow_state save_state_snapshot;
+
 static void zmk_rgb_underglow_save_state_work(struct k_work *_work) {
-    settings_save_one("rgb/underglow/state", &state, sizeof(state));
+    settings_save_one("rgb/underglow/state", &save_state_snapshot, sizeof(save_state_snapshot));
 }
 
 static struct k_work_delayable underglow_save_work;
@@ -402,6 +414,18 @@ int zmk_rgb_underglow_save_state(void) {
      * (change_brt/_hue/_sat/_spd, on/off, select_effect, set_hsb). */
     rgb_underglow_broadcast_state();
 #if IS_ENABLED(CONFIG_SETTINGS)
+    /* Snapshot for NVS at call time. Crucial: when the dimmer has
+     * ramped state.color.b down to FLOOR_PCT and AUTO_OFF.off() then
+     * AUTO_OFF.on() chains call this function, we want NVS to record
+     * the user's pre-dim brightness, not the dimmer's transient
+     * floor. Without this fix, the keyboard cold-boots from deep
+     * sleep at FLOOR_PCT instead of the saved 100% (or whatever the
+     * user actually configured). */
+    save_state_snapshot = state;
+    uint8_t user_b = zmk_rgb_idle_dimmer_get_user_brightness_or_zero();
+    if (user_b > 0 && save_state_snapshot.color.b < user_b) {
+        save_state_snapshot.color.b = user_b;
+    }
     int ret = k_work_reschedule(&underglow_save_work, K_MSEC(CONFIG_ZMK_SETTINGS_SAVE_DEBOUNCE));
     return MIN(ret, 0);
 #else

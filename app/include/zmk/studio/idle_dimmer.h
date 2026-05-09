@@ -32,8 +32,19 @@
  * re-anchors from the post-ramp baseline. */
 void zmk_rgb_idle_dimmer_notify_user_brightness(uint8_t new_pct);
 
+/* Returns the user's intended ("active") brightness as anchored by
+ * the dimmer, or 0 if the dimmer hasn't anchored yet (boot before
+ * first IDLE). Used by zmk_rgb_underglow_save_state to persist the
+ * user's pre-dim brightness to NVS instead of the dimmer's transient
+ * floor. Without this, save_state firing while the dimmer has ramped
+ * state.color.b down to FLOOR_PCT would write the floor value to
+ * flash, and the next cold boot (from deep sleep) would load it back
+ * as the "saved" brightness — keyboard wakes stuck dim. */
+uint8_t zmk_rgb_idle_dimmer_get_user_brightness_or_zero(void);
+
 #else /* !CONFIG_ZMK_STUDIO_IDLE_DIMMER */
 
 static inline void zmk_rgb_idle_dimmer_notify_user_brightness(uint8_t new_pct) { (void)new_pct; }
+static inline uint8_t zmk_rgb_idle_dimmer_get_user_brightness_or_zero(void) { return 0; }
 
 #endif /* CONFIG_ZMK_STUDIO_IDLE_DIMMER */

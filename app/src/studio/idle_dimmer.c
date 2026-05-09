@@ -108,6 +108,14 @@ static void ramp_step(struct k_work *work) {
     }
 }
 
+uint8_t zmk_rgb_idle_dimmer_get_user_brightness_or_zero(void) {
+    /* Reading active_target_pct without a lock is fine: it's a uint8_t
+     * (atomic on M4), only mutated from this file's listener context
+     * (cooperative). Worst case the caller sees a brief stale value
+     * around an anchor update, which is harmless for the persist path. */
+    return active_target_pct;
+}
+
 void zmk_rgb_idle_dimmer_notify_user_brightness(uint8_t new_pct) {
     /* Skip our own ramp's writes — those drive `current_pct` already
      * and would otherwise feed back into active_target_pct, dragging
