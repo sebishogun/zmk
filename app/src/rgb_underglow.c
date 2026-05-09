@@ -44,6 +44,16 @@
 #include <zmk/ble.h>
 #endif
 
+#include <zmk/studio/idle_dimmer.h>
+
+#if IS_ENABLED(CONFIG_ZMK_SPLIT) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) &&                    \
+    IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+#include <zmk/split/central.h>
+#define HAS_RGB_STATE_BCAST 1
+#else
+#define HAS_RGB_STATE_BCAST 0
+#endif
+
 #if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
 #include <zmk/rgb_underglow_layer.h>
 #include <zmk/keymap.h>
@@ -368,7 +378,29 @@ static int zmk_rgb_underglow_init(void) {
     return 0;
 }
 
+/* Mirror the local underglow state to every connected peripheral.
+ * Called from every state-mutation path on the central so RH stays in
+ * lock-step with LH (brightness, hue, on/off, effect, speed). On
+ * peripheral or non-split builds this is a no-op. The split transport
+ * itself filters when no peripheral is connected — we don't have to
+ * gate on connection state here. */
+static inline void rgb_underglow_broadcast_state(void) {
+#if HAS_RGB_STATE_BCAST
+    zmk_split_central_update_underglow_state(state.color.h, state.color.s, state.color.b, state.on,
+                                             state.current_effect, state.animation_speed);
+#endif
+}
+
 int zmk_rgb_underglow_save_state(void) {
+    /* Tell the idle dimmer that a non-dimmer code path just changed
+     * brightness — re-anchors active_target_pct so the next wake-from-
+     * idle ramps to this value, not whatever the dimmer last cached.
+     * No-op when the dimmer isn't in the build. The dimmer itself
+     * filters out its own ramp writes via dimmer_owns_write. */
+    zmk_rgb_idle_dimmer_notify_user_brightness(state.color.b);
+    /* Mirror to peripheral on every save-emitting state mutation
+     * (change_brt/_hue/_sat/_spd, on/off, select_effect, set_hsb). */
+    rgb_underglow_broadcast_state();
 #if IS_ENABLED(CONFIG_SETTINGS)
     int ret = k_work_reschedule(&underglow_save_work, K_MSEC(CONFIG_ZMK_SETTINGS_SAVE_DEBOUNCE));
     return MIN(ret, 0);
@@ -506,12 +538,15 @@ int zmk_rgb_underglow_set_hsb(struct zmk_led_hsb color) {
 
 // Sets brightness as a percentage (0..100) without persisting. Used by
 // the AuroraKey idle dimmer to ramp brightness up/down on activity
-// transitions while preserving the user's saved baseline.
+// transitions while preserving the user's saved baseline. Broadcasts
+// to peripheral so the RH mirrors every ramp step instead of staying
+// at the last save_state-emitted value.
 int zmk_rgb_underglow_set_brightness(uint8_t brightness) {
     if (brightness > BRT_MAX) {
         brightness = BRT_MAX;
     }
     state.color.b = brightness;
+    rgb_underglow_broadcast_state();
     return 0;
 }
 
@@ -519,6 +554,75 @@ int zmk_rgb_underglow_set_brightness(uint8_t brightness) {
 // Idle dimmer uses this as the live baseline before ramping toward the
 // idle floor and reads it again to restore on activity wake.
 uint8_t zmk_rgb_underglow_calc_effective_brightness(void) { return state.color.b; }
+
+#if !IS_ENABLED(CONFIG_ZMK_SPLIT) || !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+/* Peripheral-side mirror: take the central's snapshot and apply it
+ * locally. Mirrors what zmk_rgb_underglow_init seeds (color + on +
+ * current_effect + animation_speed) so a fresh-from-boot peripheral
+ * looks identical to central within one broadcast cycle.
+ *
+ * Central-side: this function is a no-op stub so callers don't need
+ * a #if guard at every call site. The central is the source of truth;
+ * mirroring its own state to itself is meaningless. */
+int zmk_rgb_underglow_apply_remote_state(uint16_t h, uint8_t s, uint8_t b, bool on,
+                                         uint8_t current_effect, uint8_t animation_speed) {
+    if (!led_strip) {
+        return -ENODEV;
+    }
+
+    bool was_on = state.on;
+    state.color.h = h;
+    state.color.s = s;
+    state.color.b = b;
+    state.current_effect = current_effect;
+    state.animation_speed = animation_speed;
+
+    if (on != was_on) {
+        state.on = on;
+        if (on) {
+            state.animation_step = 0;
+            zmk_rgb_set_ext_power();
+            k_timer_start(&underglow_tick, K_NO_WAIT, K_MSEC(50));
+        } else {
+            k_timer_stop(&underglow_tick);
+            zmk_rgb_set_ext_power();
+            /* Drain a final black frame so the strip doesn't hold the
+             * last-rendered pixels until something else writes. Mirrors
+             * zmk_rgb_underglow_off's render path. */
+            k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &underglow_off_work);
+        }
+    } else if (on) {
+        /* Already on — just kick the renderer once so the new HSB shows
+         * up immediately instead of waiting for the next 50 ms tick. */
+        k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &underglow_tick_work);
+    }
+
+    return 0;
+}
+#else
+int zmk_rgb_underglow_apply_remote_state(uint16_t h, uint8_t s, uint8_t b, bool on,
+                                         uint8_t current_effect, uint8_t animation_speed) {
+    (void)h;
+    (void)s;
+    (void)b;
+    (void)on;
+    (void)current_effect;
+    (void)animation_speed;
+    /* Central never mirrors remote state — caller bug if this fires. */
+    return -ENOTSUP;
+}
+#endif
+
+void zmk_rgb_underglow_resync_split_peripheral(void) {
+#if HAS_RGB_STATE_BCAST
+    /* Re-broadcast the current local state. Called from the split-bt
+     * central GATT-discovery completion path so a peripheral that just
+     * finished connecting catches up to the central's settings-loaded
+     * baseline (otherwise it sits at BRT_START until the user nudges
+     * brightness or any other setter fires). */
+    rgb_underglow_broadcast_state();
+#endif
+}
 
 struct zmk_led_hsb zmk_rgb_underglow_calc_hue(int direction) {
     struct zmk_led_hsb color = state.color;

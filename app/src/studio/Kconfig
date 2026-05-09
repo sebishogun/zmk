@@ -151,6 +151,17 @@ endif
 menuconfig ZMK_STUDIO_IDLE_DIMMER
     bool "AuroraKey: idle-driven RGB brightness ramp"
     depends on ZMK_RGB_UNDERGLOW
+    # Mutually exclusive with stock auto-off — both subscribe to
+    # zmk_activity_state_changed; auto-off cuts EXT_POWER while we want
+    # the ramp to control brightness. Listener order is undefined so
+    # they race. Kconfig hard-rejects the combination at build time
+    # rather than letting the race silently flip behaviour per build.
+    depends on !ZMK_RGB_UNDERGLOW_AUTO_OFF_IDLE
+    # Central-only on split keyboards. Peripheral mirrors brightness
+    # via the underglow-state split transport (SET_UNDERGLOW_STATE in
+    # app/src/split/central.c) — a peripheral-side listener would just
+    # fight the central's broadcast.
+    depends on !ZMK_SPLIT || ZMK_SPLIT_ROLE_CENTRAL
     default n
     help
       Smoothly ramps RGB brightness down after CONFIG_ZMK_IDLE_TIMEOUT

@@ -71,6 +71,12 @@ enum zmk_split_transport_central_command_type {
     ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_SAVE,
     ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_DISCARD,
     ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_CLEAR,
+    /* AuroraKey: full underglow state mirror (h/s/b/on/effect/speed)
+     * pushed central→peripheral on every change AND on connect so RH
+     * boots with whatever brightness/hue the user saved on LH instead
+     * of CONFIG_ZMK_RGB_UNDERGLOW_BRT_START. Fixes the long-standing
+     * "RH starts at 100% even though LH starts at 50%" desync. */
+    ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_UNDERGLOW_STATE,
 } __packed;
 
 struct zmk_split_transport_central_command {
@@ -106,5 +112,19 @@ struct zmk_split_transport_central_command {
         struct {
             uint32_t layer_id;
         } set_rgb_clear;
+
+        /* Full underglow state snapshot. Sized to the smallest serialisable
+         * form of struct rgb_underglow_state — animation_step is excluded
+         * (peripheral animates from its own clock so reusing the central's
+         * step would just snap), as is status_active (driven entirely by
+         * peripheral-side battery / BLE / HID events). */
+        struct {
+            uint16_t h;
+            uint8_t s;
+            uint8_t b;
+            uint8_t on;
+            uint8_t current_effect;
+            uint8_t animation_speed;
+        } set_underglow_state;
     } data;
 } __packed;

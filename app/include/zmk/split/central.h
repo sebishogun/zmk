@@ -49,6 +49,15 @@ int zmk_split_central_rgb_save(void);
 int zmk_split_central_rgb_discard(void);
 int zmk_split_central_rgb_clear_layer(uint32_t layer_id);
 
+/* Push the full underglow state snapshot to every connected peripheral.
+ * Caller passes the values it wants the peripheral to mirror; this
+ * function encodes + dispatches via the active transport. Idempotent:
+ * sending the same state twice is harmless. Caller is responsible for
+ * deciding when to invoke (every state mutation + once after split
+ * connection) — this function does not subscribe to anything. */
+int zmk_split_central_update_underglow_state(uint16_t h, uint8_t s, uint8_t b, bool on,
+                                             uint8_t current_effect, uint8_t animation_speed);
+
 #endif // IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
