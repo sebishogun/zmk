@@ -86,7 +86,19 @@ void activity_work_handler(struct k_work *work) {
 #if IS_ENABLED(CONFIG_AURORAKEY_FORCE_SLEEP_ON_USB)
     usb_blocks_sleep = false;
 #endif
-    if (inactive_time > MAX_SLEEP_MS && !usb_blocks_sleep) {
+    /* AuroraKey: peripheral half stays awake. Wake-source on a split is the
+     * peripheral's OWN kscan; central keypresses can't wake a peripheral
+     * from sys_poweroff over BLE. Asymmetric typing (most users only press
+     * keys on one half regularly) → peripheral enters sys_off, never sees
+     * a key, stays asleep until power cycle. Skip the sleep transition
+     * entirely on the peripheral; AUTO_OFF_IDLE still cuts EXT_POWER so
+     * RGB doesn't drain battery and the MCU's idle draw is small. */
+    bool peripheral_never_sleeps = false;
+#if IS_ENABLED(CONFIG_AURORAKEY_PERIPHERAL_NEVER_SLEEPS) && IS_ENABLED(CONFIG_ZMK_SPLIT) &&        \
+    !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+    peripheral_never_sleeps = true;
+#endif
+    if (inactive_time > MAX_SLEEP_MS && !usb_blocks_sleep && !peripheral_never_sleeps) {
         // Put devices in suspend power mode before sleeping
         set_state(ZMK_ACTIVITY_SLEEP);
 

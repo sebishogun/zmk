@@ -202,6 +202,24 @@ config AURORAKEY_FORCE_SLEEP_ON_USB
     depends on ZMK_SLEEP
     default n
 
+# AuroraKey: peripheral half never enters deep sleep (sys_poweroff).
+# On a split keyboard the peripheral's wake source is its own kscan
+# matrix — pressing keys on the central does NOT wake the peripheral
+# from system OFF. User types on central → peripheral stays asleep
+# forever (until power cycle). The peripheral's MCU draw at idle is
+# tiny (~5 mA) and AUTO_OFF still saves the LED power, so skipping
+# sys_poweroff on the peripheral is the right tradeoff for split
+# keyboards used "asymmetrically" (most typing on one half).
+# Default y when ZMK_SLEEP is on AND we're a split keyboard, so the
+# peripheral half always stays awake. Central sleep behaviour is
+# unchanged. Users who DO want both halves to sleep can untick this
+# in the editor (battery use case where the keyboard is unplugged for
+# hours and the asymmetric typing is acceptable).
+config AURORAKEY_PERIPHERAL_NEVER_SLEEPS
+    bool "AuroraKey: peripheral half stays awake even past sleep timeout"
+    depends on ZMK_SLEEP && ZMK_SPLIT
+    default y
+
 # AuroraKey: optional delay between the ZMK_ACTIVITY_IDLE event firing
 # and ZMK_RGB_UNDERGLOW_AUTO_OFF_IDLE cutting EXT_POWER. Lets the editor
 # expose three independent timeouts:
