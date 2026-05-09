@@ -47,6 +47,18 @@
         debounce-press-ms = <4>;
         debounce-release-ms = <20>;
     };
+
+    /* Wakeup sources used by both soft-off and activity-driven sleep
+     * on peripheral. zmk_pm_arm_wakers (pm.c) walks this list before
+     * sys_poweroff to enable wakeup + RESUME each device, leaving
+     * GPIO SENSE armed so a key press wakes the chip from System OFF.
+     * Without this entry the peripheral enters System OFF with no
+     * wake source and only a power cycle recovers — exactly the
+     * "RH won't wake after sleep" symptom we hit before. */
+    soft_off_wakers: soft_off_wakers {
+        compatible = "zmk,soft-off-wakeup-sources";
+        wakeup-sources = <&kscan0>;
+    };
 };
 
 &reg1 {

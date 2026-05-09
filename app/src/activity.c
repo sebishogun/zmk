@@ -102,6 +102,16 @@ void activity_work_handler(struct k_work *work) {
         // Put devices in suspend power mode before sleeping
         set_state(ZMK_ACTIVITY_SLEEP);
 
+        /* AuroraKey: arm GPIO SENSE on declared wakeup sources BEFORE
+         * suspending devices. zmk_pm_suspend_devices skips
+         * wakeup-enabled devices, leaving them resumed — which is what
+         * keeps kscan's level interrupt config in place so the nRF GPIO
+         * driver translates it into SENSE before sys_poweroff. Without
+         * this the chip enters System OFF with no wake source and
+         * pressing a key on the peripheral does nothing — only a power
+         * cycle recovers. Mirrors the soft-off path in pm.c. */
+        zmk_pm_arm_wakers();
+
         if (zmk_pm_suspend_devices() < 0) {
             LOG_ERR("Failed to suspend all the devices");
             zmk_pm_resume_devices();

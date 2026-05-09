@@ -74,8 +74,13 @@ void zmk_pm_resume_devices(void) {
 #endif /* !CONFIG_PM_DEVICE_RUNTIME_EXCLUSIVE */
 #endif /* CONFIG_ZMK_PM_DEVICE_SUSPEND_RESUME */
 
-#if IS_ENABLED(CONFIG_ZMK_PM_SOFT_OFF)
-
+/* The `zmk,soft-off-wakeup-sources` DT node + its `wakeup-sources`
+ * phandle list are reused for two paths: explicit soft-off (user
+ * presses a bound &soft_off behavior) and activity-driven sleep
+ * (peripheral idles past CONFIG_ZMK_IDLE_SLEEP_TIMEOUT). Both end
+ * in `sys_poweroff` and need the same set of GPIO sources armed for
+ * wake. Hoisted out of CONFIG_ZMK_PM_SOFT_OFF so activity.c can call
+ * zmk_pm_arm_wakers() even on builds without the soft-off behavior. */
 #define HAS_WAKERS DT_HAS_COMPAT_STATUS_OKAY(zmk_soft_off_wakeup_sources)
 
 #if HAS_WAKERS
@@ -86,6 +91,19 @@ const struct device *soft_off_wakeup_sources[] = {
     DT_FOREACH_PROP_ELEM(DT_INST(0, zmk_soft_off_wakeup_sources), wakeup_sources, DEVICE_WITH_SEP)};
 
 #endif
+
+int zmk_pm_arm_wakers(void) {
+#if HAS_WAKERS
+    for (int i = 0; i < ARRAY_SIZE(soft_off_wakeup_sources); i++) {
+        const struct device *dev = soft_off_wakeup_sources[i];
+        pm_device_wakeup_enable(dev, true);
+        pm_device_action_run(dev, PM_DEVICE_ACTION_RESUME);
+    }
+#endif
+    return 0;
+}
+
+#if IS_ENABLED(CONFIG_ZMK_PM_SOFT_OFF)
 
 int zmk_pm_soft_off(void) {
 #if IS_ENABLED(CONFIG_PM_DEVICE)
@@ -115,13 +133,7 @@ int zmk_pm_soft_off(void) {
     }
 #endif // IS_ENABLED(CONFIG_PM_DEVICE)
 
-#if HAS_WAKERS
-    for (int i = 0; i < ARRAY_SIZE(soft_off_wakeup_sources); i++) {
-        const struct device *dev = soft_off_wakeup_sources[i];
-        pm_device_wakeup_enable(dev, true);
-        pm_device_action_run(dev, PM_DEVICE_ACTION_RESUME);
-    }
-#endif // HAS_WAKERS
+    zmk_pm_arm_wakers();
 
     int err = zmk_pm_suspend_devices();
     if (err < 0) {
