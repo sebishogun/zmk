@@ -248,10 +248,10 @@ static void split_svc_update_underglow_state_callback(struct k_work *work) {
             pending_underglow_state.h, pending_underglow_state.s, pending_underglow_state.b,
             pending_underglow_state.on, pending_underglow_state.current_effect,
             pending_underglow_state.animation_speed);
-    zmk_rgb_underglow_apply_remote_state(
-        pending_underglow_state.h, pending_underglow_state.s, pending_underglow_state.b,
-        pending_underglow_state.on != 0, pending_underglow_state.current_effect,
-        pending_underglow_state.animation_speed);
+    zmk_rgb_underglow_apply_remote_state(pending_underglow_state.h, pending_underglow_state.s,
+                                         pending_underglow_state.b, pending_underglow_state.on != 0,
+                                         pending_underglow_state.current_effect,
+                                         pending_underglow_state.animation_speed);
 }
 static K_WORK_DEFINE(split_svc_update_underglow_state_work,
                      split_svc_update_underglow_state_callback);

@@ -155,10 +155,11 @@ static const struct behavior_driver_api behavior_slot_macro_driver_api = {
 static const struct behavior_parameter_value_metadata param1_values[] = {
     {
         .type = BEHAVIOR_PARAMETER_VALUE_TYPE_RANGE,
-        .range = {
-            .min = 0,
-            .max = CONFIG_ZMK_STUDIO_MACRO_SLOT_COUNT - 1,
-        },
+        .range =
+            {
+                .min = 0,
+                .max = CONFIG_ZMK_STUDIO_MACRO_SLOT_COUNT - 1,
+            },
     },
 };
 

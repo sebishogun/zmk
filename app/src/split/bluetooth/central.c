@@ -561,8 +561,7 @@ static void rgb_underglow_split_resync_handler(struct k_work *work) {
     ARG_UNUSED(work);
     zmk_rgb_underglow_resync_split_peripheral();
 }
-static K_WORK_DELAYABLE_DEFINE(rgb_underglow_split_resync_work,
-                               rgb_underglow_split_resync_handler);
+static K_WORK_DELAYABLE_DEFINE(rgb_underglow_split_resync_work, rgb_underglow_split_resync_handler);
 #endif // IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
 
 static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
