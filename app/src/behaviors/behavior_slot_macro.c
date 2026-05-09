@@ -130,8 +130,14 @@ static int on_slot_macro_pressed(struct zmk_behavior_binding *binding,
             .param1 = b->param1,
             .param2 = b->param2,
         };
-        zmk_behavior_queue_add(event.position, inner, true, tap_ms);
-        zmk_behavior_queue_add(event.position, inner, false, wait_ms);
+        /* zmk_behavior_queue_add takes the full event struct (pointer)
+         * since the upstream API change — earlier signature took bare
+         * `position`. behavior_macro.c was migrated to the new shape but
+         * slot_macro.c was not, surfacing as a -Wint-conversion fatal
+         * when the workspace's RGB underglow stack pulled in the strict
+         * warning set. Pass &event to mirror behavior_macro.c:175-182. */
+        zmk_behavior_queue_add(&event, inner, true, tap_ms);
+        zmk_behavior_queue_add(&event, inner, false, wait_ms);
     }
     return ZMK_BEHAVIOR_OPAQUE;
 }
@@ -155,10 +161,11 @@ static const struct behavior_driver_api behavior_slot_macro_driver_api = {
 static const struct behavior_parameter_value_metadata param1_values[] = {
     {
         .type = BEHAVIOR_PARAMETER_VALUE_TYPE_RANGE,
-        .range = {
-            .min = 0,
-            .max = CONFIG_ZMK_STUDIO_MACRO_SLOT_COUNT - 1,
-        },
+        .range =
+            {
+                .min = 0,
+                .max = CONFIG_ZMK_STUDIO_MACRO_SLOT_COUNT - 1,
+            },
     },
 };
 
