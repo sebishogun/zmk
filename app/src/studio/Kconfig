@@ -272,6 +272,20 @@ config AURORAKEY_GAME_TICK_MS
     default 200
     range 50 2000
 
+config AURORAKEY_GAME_FULL_SCREEN
+    bool "AuroraKey: render games on both halves (full screen)"
+    default y
+    help
+      When y, the game runtime fans every painted pixel out to the
+      peripheral over split-bt so both halves of the keyboard show the
+      game (Snake walking across the full board, etc.). When n, the
+      runtime only writes to the central's local LED strip — RH
+      renders whatever the layer's normal colours are. Off mode trades
+      visual coverage for ZERO BLE link traffic during gameplay, which
+      can be smoother on flaky links and is the original "LH-only"
+      fallback if both-halves rendering misbehaves on the user's
+      hardware.
+
 config AURORAKEY_GAME_SNAKE
     bool "AuroraKey: Snake"
     default y

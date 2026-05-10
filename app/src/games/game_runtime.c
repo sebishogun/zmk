@@ -35,7 +35,7 @@ LOG_MODULE_REGISTER(aurorakey_games, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/rgb_underglow_layer.h>
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) &&                   \
-    IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+    IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER) && IS_ENABLED(CONFIG_AURORAKEY_GAME_FULL_SCREEN)
 #include <zmk/split/central.h>
 #define GAME_FANOUT_TO_PERIPHERAL 1
 #else
@@ -61,6 +61,34 @@ LOG_MODULE_REGISTER(aurorakey_games, CONFIG_ZMK_LOG_LEVEL);
 static bool game_active = false;
 static uint32_t game_layer_id = 0;
 
+/* Per-key cache of the colour we last pushed over split-bt to the
+ * peripheral. Re-painting the same colour is a no-op for the user
+ * and adds wasteful traffic on the BLE link — at 80 cells × 5 Hz
+ * tick = 400 writes/sec, the central's split-bt msgq fills up
+ * (typical capacity ~16), the EAGAIN handler evicts the oldest
+ * write, and most of the frame's pixels get dropped en route to
+ * RH. Result: RH renders a corrupt half-frame or just falls back
+ * to the layer's normal colours.
+ *
+ * With this dirty cache we only fanout cells whose colour actually
+ * changed since the last paint. A typical Snake frame mutates ~5
+ * cells (old tail off, new head on, maybe food), so fanout drops
+ * from 80/tick to ~5/tick and the BLE link comfortably keeps up. */
+static uint32_t last_pushed[ZMK_KEYMAP_LEN];
+/* On game entry we issue a single split-bt clear_layer (opcode 0x04)
+ * to the peripheral, which wipes its pending + live overlay for our
+ * layer in one BLE write instead of 80. After that we KNOW the
+ * peripheral's cells are unset (renderer falls through to whatever
+ * the game layer's normal DT bindings render), so we mark our local
+ * cache as "off" — paint_one with off colour matches and stays a
+ * no-op for cells the game doesn't actively light. Net traffic:
+ * 1 clear + N lit cells per frame, instead of 80 cells per frame. */
+static void cache_reset_to_off(void) {
+    for (int i = 0; i < ZMK_KEYMAP_LEN; i++) {
+        last_pushed[i] = GAME_COLOR_OFF;
+    }
+}
+
 /* ─── Public paint API ─────────────────────────────────────────────── */
 
 /* paint_one writes a single pixel to BOTH the central's local
@@ -69,15 +97,26 @@ static uint32_t game_layer_id = 0;
  * stay dark and the game only renders on LH — exactly what we hit
  * before this fix. Mirrors the Studio set_key_color RPC handler at
  * rgb_subsystem.c:37-44, which has stage_set + split_central_update_rgb_color
- * in the same function for the same reason. */
+ * in the same function for the same reason.
+ *
+ * Dirty-cache: skip both the local stage_set AND the split-bt fanout
+ * when the colour matches what we last pushed for this cell. Local
+ * stage_set is cheap (atomic store + mask bit) but skipping it keeps
+ * the renderer's per-tick work proportional to the diff, not the
+ * board size. The fanout skip is the critical part — it stops the
+ * msgq flood that drops RH frames. */
 static void paint_one(int pos, uint32_t color) {
     if (pos < 0 || pos >= ZMK_KEYMAP_LEN) {
+        return;
+    }
+    if (last_pushed[pos] == color) {
         return;
     }
     zmk_rgb_underglow_layer_stage_set(game_layer_id, (uint32_t)pos, color);
 #if GAME_FANOUT_TO_PERIPHERAL
     zmk_split_central_update_rgb_color(game_layer_id, (uint32_t)pos, color);
 #endif
+    last_pushed[pos] = color;
 }
 
 void game_paint(int x, int y, uint32_t color) {
@@ -161,6 +200,19 @@ static void activate(void) {
     }
     game_layer_id = (uint32_t)zmk_keymap_layer_index_to_id((zmk_keymap_layer_index_t)GAME_LAYER);
     game_active = true;
+    /* Wipe the layer's overlay on BOTH halves before painting the
+     * first frame. Single split-bt write (clear_layer = opcode 0x04)
+     * instead of 80 individual cell pushes — the BLE link can absorb
+     * one packet but flooding 80 in a burst trashes the central's
+     * msgq, drops most writes, and RH ends up rendering a half-frame.
+     * After the clear we know peripheral has nothing for our layer
+     * so cache_reset_to_off matches reality and paint_one(off) on
+     * unlit cells skips fanout cleanly. */
+    zmk_rgb_underglow_layer_clear(game_layer_id);
+#if GAME_FANOUT_TO_PERIPHERAL
+    zmk_split_central_rgb_clear_layer(game_layer_id);
+#endif
+    cache_reset_to_off();
     LOG_INF("game enter (layer index=%d, layer_id=%u)", (int)GAME_LAYER, game_layer_id);
     dispatch_enter();
     /* First tick fires immediately so the user sees the initial frame
@@ -178,8 +230,13 @@ static void deactivate(void) {
     game_active = false;
     k_work_cancel_delayable(&tick_work);
     /* Release every pixel we painted — the game layer falls back to
-     * whatever the editor configured (or the layer default). */
+     * whatever the editor configured (or the layer default). One
+     * clear-layer fanout to RH so it stops rendering our pixels too. */
     zmk_rgb_underglow_layer_clear(game_layer_id);
+#if GAME_FANOUT_TO_PERIPHERAL
+    zmk_split_central_rgb_clear_layer(game_layer_id);
+#endif
+    cache_reset_to_off();
 }
 
 /* ─── Event listeners ─────────────────────────────────────────────── */
