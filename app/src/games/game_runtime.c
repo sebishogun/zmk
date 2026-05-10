@@ -40,10 +40,9 @@ LOG_MODULE_REGISTER(aurorakey_games, CONFIG_ZMK_LOG_LEVEL);
 #if IS_ENABLED(CONFIG_AURORAKEY_GAMES)
 
 #define GAME_LAYER CONFIG_AURORAKEY_GAME_LAYER
+#define EXIT_POS CONFIG_AURORAKEY_GAME_EXIT_POSITION
 
-/* Glove80 thumb-cluster matrix positions used as game inputs. Other
- * keys on the game layer fall through to normal keymap dispatch so
- * the user can still bind &to 0 / &reset / etc. on non-thumb keys. */
+/* Glove80 thumb-cluster matrix positions used as game inputs. */
 #define KEY_LH_START 52
 #define KEY_LH_RESET 54
 #define KEY_RH_UP 56
@@ -189,12 +188,20 @@ static int on_position_state(const zmk_event_t *eh) {
     if (!ev) {
         return ZMK_EV_EVENT_BUBBLE;
     }
-    /* Only consume the thumb-cluster game keys on press. Other keys
-     * (and any release event) fall through so the keymap can still
-     * fire e.g. &to 0 to exit the layer, &reset, &bootloader, etc. */
+    /* Releases pass through silently — gameplay is press-driven; we
+     * still want releases to clear any pressed-key state the kernel
+     * tracks so we don't leave anything stuck after exiting the
+     * layer. */
     if (!ev->state) {
-        return ZMK_EV_EVENT_BUBBLE;
+        return ZMK_EV_EVENT_HANDLED;
     }
+    /* Exit key: switch the keymap back to layer 0 (base). The layer-
+     * state listener picks up the change and runs game_exit cleanup. */
+    if ((int)ev->position == EXIT_POS) {
+        zmk_keymap_layer_to(zmk_keymap_layer_index_to_id(0), false);
+        return ZMK_EV_EVENT_HANDLED;
+    }
+    /* Game inputs: thumb-cluster keys handled by the active module. */
     switch (ev->position) {
     case KEY_LH_START:
     case KEY_LH_RESET:
@@ -205,7 +212,11 @@ static int on_position_state(const zmk_event_t *eh) {
         dispatch_input(ev->position);
         return ZMK_EV_EVENT_HANDLED;
     default:
-        return ZMK_EV_EVENT_BUBBLE;
+        /* Every other key on the game layer is silently consumed so
+         * the user can't accidentally type letters mid-snake. The
+         * dedicated layer + intercept-all is the production UX
+         * contract: a game layer is for the game only. */
+        return ZMK_EV_EVENT_HANDLED;
     }
 }
 

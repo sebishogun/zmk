@@ -253,8 +253,19 @@ if AURORAKEY_GAMES
 
 config AURORAKEY_GAME_LAYER
     int "AuroraKey: keymap layer index that activates the game runtime"
-    default 0
+    default 4
     range 0 31
+
+config AURORAKEY_GAME_EXIT_POSITION
+    int "AuroraKey: matrix position that exits the game and returns to layer 0"
+    default 53
+    range 0 79
+    help
+      When a game is active and the user presses this matrix position,
+      the runtime exits the game and switches the keymap back to layer
+      0. Default 53 = Glove80 LH outer thumb (between start and reset
+      on the standard thumb cluster). Other thumb positions used by
+      games: 52 (start/pause), 54 (reset), 56/57/72/73 (RH arrows).
 
 config AURORAKEY_GAME_TICK_MS
     int "AuroraKey: default game tick interval (ms)"
