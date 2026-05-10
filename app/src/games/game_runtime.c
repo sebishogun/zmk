@@ -27,7 +27,9 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(aurorakey_games, CONFIG_ZMK_LOG_LEVEL);
 
+#include <zmk/activity.h>
 #include <zmk/event_manager.h>
+#include <zmk/events/activity_state_changed.h>
 #include <zmk/events/layer_state_changed.h>
 #include <zmk/events/position_state_changed.h>
 #include <zmk/keymap.h>
@@ -308,5 +310,31 @@ static int on_position_state(const zmk_event_t *eh) {
 
 ZMK_LISTENER(aurorakey_game_input, on_position_state);
 ZMK_SUBSCRIPTION(aurorakey_game_input, zmk_position_state_changed);
+
+/* Force-deactivate the game when the keyboard transitions to IDLE /
+ * SLEEP. Two reasons:
+ *  - The 50 ms tick work loop would otherwise keep firing right up
+ *    until sys_poweroff, fighting the activity manager for the system
+ *    work queue and adding scheduling pressure during sleep transition.
+ *  - On wake (post-poweroff fresh boot) the keymap defaults to the
+ *    base layer, so we wouldn't auto-activate anyway — but if the
+ *    keymap retained the game layer somehow, deactivate-on-sleep
+ *    means we cleanly cancel pending work and release the overlay
+ *    before powering off, no half-state surviving the boundary. */
+static int on_activity_state(const zmk_event_t *eh) {
+    const struct zmk_activity_state_changed *ev = as_zmk_activity_state_changed(eh);
+    if (!ev) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+    if (game_active &&
+        (ev->state == ZMK_ACTIVITY_IDLE || ev->state == ZMK_ACTIVITY_SLEEP)) {
+        LOG_INF("game force-deactivate on activity=%d", (int)ev->state);
+        deactivate();
+    }
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(aurorakey_game_activity, on_activity_state);
+ZMK_SUBSCRIPTION(aurorakey_game_activity, zmk_activity_state_changed);
 
 #endif /* CONFIG_AURORAKEY_GAMES */
