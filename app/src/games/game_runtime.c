@@ -34,6 +34,14 @@ LOG_MODULE_REGISTER(aurorakey_games, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/matrix.h>
 #include <zmk/rgb_underglow_layer.h>
 
+#if IS_ENABLED(CONFIG_ZMK_SPLIT) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) &&                   \
+    IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+#include <zmk/split/central.h>
+#define GAME_FANOUT_TO_PERIPHERAL 1
+#else
+#define GAME_FANOUT_TO_PERIPHERAL 0
+#endif
+
 #include "game_board.h"
 #include "game_runtime.h"
 
@@ -55,6 +63,23 @@ static uint32_t game_layer_id = 0;
 
 /* ─── Public paint API ─────────────────────────────────────────────── */
 
+/* paint_one writes a single pixel to BOTH the central's local
+ * pending overlay AND the peripheral via the split-bt UPDATE_RGB_COLOR
+ * opcode 0x01 fanout. Without the fanout step the RH-strip pixels
+ * stay dark and the game only renders on LH — exactly what we hit
+ * before this fix. Mirrors the Studio set_key_color RPC handler at
+ * rgb_subsystem.c:37-44, which has stage_set + split_central_update_rgb_color
+ * in the same function for the same reason. */
+static void paint_one(int pos, uint32_t color) {
+    if (pos < 0 || pos >= ZMK_KEYMAP_LEN) {
+        return;
+    }
+    zmk_rgb_underglow_layer_stage_set(game_layer_id, (uint32_t)pos, color);
+#if GAME_FANOUT_TO_PERIPHERAL
+    zmk_split_central_update_rgb_color(game_layer_id, (uint32_t)pos, color);
+#endif
+}
+
 void game_paint(int x, int y, uint32_t color) {
     if (!game_active) {
         return;
@@ -62,11 +87,7 @@ void game_paint(int x, int y, uint32_t color) {
     if (x < 0 || x >= game_board.width || y < 0 || y >= game_board.height) {
         return;
     }
-    int pos = game_board.xy_to_pos(x, y);
-    if (pos < 0 || pos >= ZMK_KEYMAP_LEN) {
-        return;
-    }
-    zmk_rgb_underglow_layer_stage_set(game_layer_id, (uint32_t)pos, color);
+    paint_one(game_board.xy_to_pos(x, y), color);
 }
 
 void game_paint_clear(void) {
@@ -75,10 +96,7 @@ void game_paint_clear(void) {
     }
     for (int y = 0; y < game_board.height; y++) {
         for (int x = 0; x < game_board.width; x++) {
-            int pos = game_board.xy_to_pos(x, y);
-            if (pos >= 0 && pos < ZMK_KEYMAP_LEN) {
-                zmk_rgb_underglow_layer_stage_set(game_layer_id, (uint32_t)pos, GAME_COLOR_OFF);
-            }
+            paint_one(game_board.xy_to_pos(x, y), GAME_COLOR_OFF);
         }
     }
 }
