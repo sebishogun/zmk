@@ -63,6 +63,12 @@ LOG_MODULE_DECLARE(aurorakey_games, CONFIG_ZMK_LOG_LEVEL);
 #define MIN_TICK_MS 60
 
 enum snake_phase {
+    PHASE_WARMUP, /* paint OFF on every cell over many ticks so the
+                   * black-canvas establishment doesn't burst-overrun
+                   * the split-bt run queue (size 5) on full-screen
+                   * mode. Without this, RH receives only the last 5
+                   * cells of an 80-cell push and the canvas never
+                   * lands. Costs ~1 s of preamble before INTRO. */
     PHASE_INTRO,
     PHASE_PLAYING,
     PHASE_PAUSED,
@@ -73,6 +79,10 @@ enum snake_phase {
 #define INTRO_MS 1500
 #define FULLBOARD_FLASH_MS                                                                         \
     400 /* DEAD / WON: flash entire board for this long, then settle into body-only */
+#define WARMUP_CELLS_PER_TICK                                                                      \
+    4 /* 80 cells / 4 per 50 ms tick = 1 s warmup. Stays under the BLE                             \
+       * write rate (~100/sec) so peripheral receives every cell. */
+#define WARMUP_TICK_MS 50
 
 struct cell {
     int8_t x;
@@ -94,6 +104,19 @@ struct snake {
     int64_t phase_started_ms;
     /* Body pulse on pause: a 0..1..0 ramp over PAUSE_PULSE_MS. */
     int playable_cells;
+    /* Diff-render state: cells we lit last frame so we can erase any
+     * that aren't lit this frame. Drops per-tick fanout from 80 cells
+     * (full-board paint_clear) to ~3 cells (head moves, tail vacates,
+     * food maybe), which is the difference between BLE saturation and
+     * comfortable both-halves rendering. */
+    struct cell prev_body[SNAKE_MAX_LEN];
+    int prev_len;
+    struct cell prev_food;
+    bool prev_food_valid;
+    /* Warmup pass: row-major index of the next cell to paint OFF
+     * during PHASE_WARMUP. Advances WARMUP_CELLS_PER_TICK per tick
+     * until we've covered the whole board, then transitions to INTRO. */
+    int warmup_pos;
 };
 
 static struct snake S;
@@ -260,7 +283,11 @@ static void snake_reset(void) {
     S.dy = 0;
     S.dir_buffer_len = 0;
     S.tick_ms = snake_default_tick_ms();
-    S.phase = PHASE_INTRO;
+    /* Start in WARMUP, not INTRO. Warmup paints the black canvas
+     * incrementally so RH actually receives every cell instead of
+     * losing 75 of 80 to BLE-queue eviction. memset above already
+     * cleared warmup_pos / prev_len / prev_food_valid. */
+    S.phase = PHASE_WARMUP;
     S.phase_started_ms = k_uptime_get();
     S.playable_cells = playable_cell_count();
     place_food();
@@ -456,32 +483,43 @@ static void render_intro(void) {
     }
 }
 
-static void render(void) {
-    /* Intro is its own thing — bypasses the body/food paint. */
-    if (S.phase == PHASE_INTRO) {
-        render_intro();
-        return;
+/* Paint WARMUP_CELLS_PER_TICK OFF cells per tick, walking the board
+ * row-major. Drains naturally through the BLE queue at ~80 cells/sec
+ * so RH receives every cell instead of losing 75 of 80 to eviction. */
+static void render_warmup(void) {
+    int total = game_board.width * game_board.height;
+    int end = S.warmup_pos + WARMUP_CELLS_PER_TICK;
+    if (end > total) {
+        end = total;
     }
-    /* DEAD / WON flash the entire board for the first ~400ms so the
-     * user gets an instant "screen flashed red/green" cue, then
-     * settle into the body-only flash for the remaining wait. */
-    int64_t age = k_uptime_get() - S.phase_started_ms;
-    if (S.phase == PHASE_DEAD && age < FULLBOARD_FLASH_MS) {
-        paint_full_board(GAME_COLOR(0xFF0000));
-        return;
+    for (int i = S.warmup_pos; i < end; i++) {
+        int x = i % game_board.width;
+        int y = i / game_board.width;
+        game_paint(x, y, GAME_COLOR_OFF);
     }
-    if (S.phase == PHASE_WON && age < FULLBOARD_FLASH_MS) {
-        paint_full_board(GAME_COLOR(0x00FF00));
-        return;
+    S.warmup_pos = end;
+}
+
+/* Steady-state diff-only render. Erases cells the snake vacated since
+ * last frame, paints the new body + food. ~3 cell-pushes per tick in
+ * common case (head moves, tail vacates, food unchanged) versus 80 if
+ * we re-painted the whole board. Critical for both-halves mode where
+ * the BLE link can only sustain ~100 writes/sec. */
+static void render_diff(void) {
+    /* 1. Erase cells in last frame's body that aren't in the current
+     *    body. game_paint(OFF) on cells already cached as OFF is a
+     *    no-op via the dirty cache, so collisions cost nothing. */
+    for (int i = 0; i < S.prev_len; i++) {
+        struct cell c = S.prev_body[i];
+        if (!cell_in_body(c.x, c.y, S.len)) {
+            game_paint(c.x, c.y, GAME_COLOR_OFF);
+        }
     }
-    game_paint_clear();
-    /* Food: red. Painted before the body so head colour wins if the
-     * head ever overlaps food (it shouldn't — we transition to ate
-     * before render — but defensive). */
-    if (S.phase == PHASE_PLAYING || S.phase == PHASE_PAUSED) {
-        game_paint(S.food.x, S.food.y, GAME_COLOR(0xFF0000));
+    /* 2. Erase old food cell if it moved. */
+    if (S.prev_food_valid && (S.prev_food.x != S.food.x || S.prev_food.y != S.food.y)) {
+        game_paint(S.prev_food.x, S.prev_food.y, GAME_COLOR_OFF);
     }
-    /* Body. */
+    /* 3. Compute body colours from phase. */
     uint32_t head_color, body_color;
     switch (S.phase) {
     case PHASE_DEAD:
@@ -496,24 +534,64 @@ static void render(void) {
         /* Slow pulse on the body so the user knows the game is on. */
         int64_t pause_age = k_uptime_get() - S.phase_started_ms;
         int phase_t = (int)((pause_age / 25) % 80);
-        int amp = phase_t < 40 ? phase_t : (80 - phase_t); /* 0..40..0 */
-        uint8_t b = (uint8_t)(amp * 4);                    /* up to ~160 */
-        head_color = GAME_COLOR((uint32_t)b << 8);         /* dim green pulse */
+        int amp = phase_t < 40 ? phase_t : (80 - phase_t);
+        uint8_t b = (uint8_t)(amp * 4);
+        head_color = GAME_COLOR((uint32_t)b << 8);
         body_color = GAME_COLOR(((uint32_t)(b / 2)) << 8);
         break;
     }
-    case PHASE_INTRO: /* unreachable — handled above */
+    case PHASE_WARMUP: /* unreachable */
+    case PHASE_INTRO:  /* unreachable */
     case PHASE_PLAYING:
     default:
         head_color = GAME_COLOR(0x00FF00);
         body_color = GAME_COLOR(0x004000);
         break;
     }
-    /* Render tail-first so the head paints last (wins on overlap). */
+    /* 4. Paint food first (head wins if there's any overlap). */
+    if (S.phase == PHASE_PLAYING || S.phase == PHASE_PAUSED) {
+        game_paint(S.food.x, S.food.y, GAME_COLOR(0xFF0000));
+    }
+    /* 5. Paint body tail-first so head paints last. */
     for (int i = S.len - 1; i >= 0; i--) {
         uint32_t c = (i == 0) ? head_color : body_color;
         game_paint(S.body[i].x, S.body[i].y, c);
     }
+    /* 6. Save state for next frame's diff pass. */
+    for (int i = 0; i < S.len; i++) {
+        S.prev_body[i] = S.body[i];
+    }
+    S.prev_len = S.len;
+    S.prev_food = S.food;
+    S.prev_food_valid = true;
+}
+
+static void render(void) {
+    if (S.phase == PHASE_WARMUP) {
+        render_warmup();
+        return;
+    }
+    if (S.phase == PHASE_INTRO) {
+        render_intro();
+        return;
+    }
+    /* DEAD / WON flash the entire board for the first ~400ms so the
+     * user gets an instant "screen flashed red/green" cue, then
+     * settle into the body-only flash for the remaining wait. The
+     * full-board paint here is a one-time burst per phase transition
+     * (dirty cache makes subsequent re-paints no-ops); BLE saturates
+     * for ~800 ms but that's during the flash which already pauses
+     * gameplay. */
+    int64_t age = k_uptime_get() - S.phase_started_ms;
+    if (S.phase == PHASE_DEAD && age < FULLBOARD_FLASH_MS) {
+        paint_full_board(GAME_COLOR(0xFF0000));
+        return;
+    }
+    if (S.phase == PHASE_WON && age < FULLBOARD_FLASH_MS) {
+        paint_full_board(GAME_COLOR(0x00FF00));
+        return;
+    }
+    render_diff();
 }
 
 /* ─── Game module hooks ────────────────────────────────────────────── */
@@ -530,10 +608,22 @@ void snake_exit(void) { /* Nothing to do; runtime clears the layer's overlay. */
 void snake_tick(void) {
     int64_t now = k_uptime_get();
     switch (S.phase) {
+    case PHASE_WARMUP:
+        if (S.warmup_pos >= game_board.width * game_board.height) {
+            S.phase = PHASE_INTRO;
+            S.phase_started_ms = now;
+        }
+        break;
     case PHASE_INTRO:
         if (now - S.phase_started_ms >= INTRO_MS) {
             S.phase = PHASE_PLAYING;
             S.phase_started_ms = now;
+            /* Wipe the GO letters so render_diff doesn't leave them
+             * lit forever. Only the ~18 letter cells actually push
+             * (every other cell is cached as OFF from warmup), and
+             * the dirty cache short-circuits the rest. The first
+             * PLAYING tick then paints the snake on a clean canvas. */
+            game_paint_clear();
         }
         break;
     case PHASE_PLAYING:
@@ -579,10 +669,16 @@ void snake_input(uint32_t position) {
         }
         break;
     case KEY_LH_START:
+        if (S.phase == PHASE_WARMUP) {
+            /* Ignore — warmup must complete to establish the black
+             * canvas on RH; skipping leaves stale cells. ~1 s wait. */
+            break;
+        }
         if (S.phase == PHASE_INTRO) {
             /* Skip the splash — start playing immediately. */
             S.phase = PHASE_PLAYING;
             S.phase_started_ms = k_uptime_get();
+            game_paint_clear();
         } else if (S.phase == PHASE_PLAYING) {
             enter_phase(PHASE_PAUSED);
         } else if (S.phase == PHASE_PAUSED) {
@@ -602,8 +698,12 @@ void snake_input(uint32_t position) {
 }
 
 int snake_tick_ms(void) {
-    /* INTRO / PAUSED / DEAD / WON tick at 50 ms so the splash + flash
-     * animations look smooth. Gameplay tick honours S.tick_ms. */
+    /* WARMUP / INTRO / PAUSED / DEAD / WON tick at 50 ms so the canvas
+     * fill + splash + flash animations stay smooth. Gameplay tick
+     * honours S.tick_ms. */
+    if (S.phase == PHASE_WARMUP) {
+        return WARMUP_TICK_MS;
+    }
     if (S.phase == PHASE_INTRO || S.phase == PHASE_PAUSED || S.phase == PHASE_DEAD ||
         S.phase == PHASE_WON) {
         return 50;
