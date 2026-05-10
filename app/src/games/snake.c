@@ -435,14 +435,24 @@ static void render_intro(void) {
     uint32_t g = brightness * 240 / 255;
     uint32_t b = brightness;
     uint32_t color = GAME_COLOR((r << 16) | (g << 8) | b);
-    /* G on LH cols 1..3, rows 0..4. */
-    draw_glyph(glyph_G, 1, 0, color);
-    /* O on RH cols 9..11, rows 0..4 — only when the playable area
-     * actually reaches that column. In LH-only mode (playable_x_max=5)
-     * the O cells aren't rendered, so just show the G; the user still
-     * gets a clear "GO" cue from the single letter waking up. */
     if (game_board.playable_x_max >= 11) {
+        /* Full-screen: G on LH cols 1..3, O on RH cols 9..11. Both
+         * letters appear together throughout the intro because both
+         * halves are visible; the user reads "GO" on either side from
+         * the moment the splash starts. */
+        draw_glyph(glyph_G, 1, 0, color);
         draw_glyph(glyph_O, 9, 0, color);
+    } else {
+        /* LH-only: 6-col strip can fit G + O side-by-side (cols 0..2
+         * and 3..5) but it looks better to sequence them so the user
+         * sees the letters land. G appears from t=0 and fades in over
+         * the first half; O joins at the halfway mark already at full
+         * brightness. By the end of the intro both letters sit lit
+         * across the LH strip. */
+        draw_glyph(glyph_G, 0, 0, color);
+        if (age >= INTRO_MS / 2) {
+            draw_glyph(glyph_O, 3, 0, color);
+        }
     }
 }
 
