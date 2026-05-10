@@ -50,12 +50,16 @@ LOG_MODULE_REGISTER(aurorakey_games, CONFIG_ZMK_LOG_LEVEL);
 #define GAME_LAYER CONFIG_AURORAKEY_GAME_LAYER
 #define EXIT_POS CONFIG_AURORAKEY_GAME_EXIT_POSITION
 
-/* Glove80 thumb-cluster matrix positions used as game inputs. */
+/* Glove80 thumb-cluster matrix positions used as game inputs.
+ * RH cluster D-pad layout:
+ *   top row    [ 55  56  57 ]   left up right
+ *   bottom row [ 72  73  74 ]   . down .
+ * Bottom-middle alone for down so the thumb can rest naturally. */
 #define KEY_LH_START 52
 #define KEY_LH_RESET 54
+#define KEY_RH_LEFT 55
 #define KEY_RH_UP 56
 #define KEY_RH_RIGHT 57
-#define KEY_RH_LEFT 72
 #define KEY_RH_DOWN 73
 
 static bool game_active = false;

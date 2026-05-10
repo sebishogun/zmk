@@ -47,9 +47,15 @@ LOG_MODULE_DECLARE(aurorakey_games, CONFIG_ZMK_LOG_LEVEL);
 
 #define KEY_LH_START 52
 #define KEY_LH_RESET 54
+/* RH thumb cluster — D-pad layout matching the physical key positions:
+ *   top row    [ 55  56  57 ]   left up right
+ *   bottom row [ 72  73  74 ]   . down .
+ * 73 (bottom-middle) is the only bottom-row binding so the user can rest
+ * their thumb naturally and reach all four directions without crossing
+ * fingers. */
+#define KEY_RH_LEFT 55
 #define KEY_RH_UP 56
 #define KEY_RH_RIGHT 57
-#define KEY_RH_LEFT 72
 #define KEY_RH_DOWN 73
 
 /* Flash duration on death / win. Pure cosmetic — gameplay is paused. */
@@ -77,8 +83,11 @@ enum snake_phase {
 };
 
 #define INTRO_MS 1500
-#define FULLBOARD_FLASH_MS                                                                         \
-    400 /* DEAD / WON: flash entire board for this long, then settle into body-only */
+/* DEAD / WON full-board flash duration. Long enough for the rate-limited
+ * fill to cover all 80 cells (4 cells/tick × 20 ticks × 50 ms = 1000 ms);
+ * after this elapses the render falls into body-only flash for the rest
+ * of SNAKE_DEATH_FLASH_MS / SNAKE_WIN_FLASH_MS. */
+#define FULLBOARD_FLASH_MS 1000
 #define WARMUP_CELLS_PER_TICK                                                                      \
     4 /* 80 cells / 4 per 50 ms tick = 1 s warmup. Stays under the BLE                             \
        * write rate (~100/sec) so peripheral receives every cell. */
@@ -117,6 +126,10 @@ struct snake {
      * during PHASE_WARMUP. Advances WARMUP_CELLS_PER_TICK per tick
      * until we've covered the whole board, then transitions to INTRO. */
     int warmup_pos;
+    /* Same idea for the DEAD / WON full-board flash: paint the red /
+     * green wash incrementally to keep within the BLE budget. Reset
+     * to 0 in enter_phase whenever we transition into DEAD or WON. */
+    int flash_pos;
 };
 
 static struct snake S;
@@ -345,6 +358,10 @@ static void consume_one_buffered_direction(void) {
 static void enter_phase(enum snake_phase phase) {
     S.phase = phase;
     S.phase_started_ms = k_uptime_get();
+    if (phase == PHASE_DEAD || phase == PHASE_WON) {
+        /* Restart the rate-limited flash from cell 0. */
+        S.flash_pos = 0;
+    }
 }
 
 static void step_playing(void) {
@@ -419,17 +436,26 @@ static void step_playing(void) {
 
 /* ─── Render ───────────────────────────────────────────────────────── */
 
-/* Fill every cell on the playable board with `color`. Used by the
- * full-board flash on DEAD / WON to give the user an unmistakable
- * cue something just happened. */
+/* Fill the playable board with `color`, but spread across multiple
+ * ticks so the BLE link doesn't choke. WARMUP_CELLS_PER_TICK cells
+ * per call, advancing flash_pos in row-major order. After ~20 ticks
+ * (1 s) every playable cell has been painted; subsequent ticks are
+ * dirty-cache no-ops. Called from render() during DEAD / WON. */
 static void paint_full_board(uint32_t color) {
-    for (int y = 0; y < game_board.height; y++) {
-        for (int x = 0; x <= game_board.playable_x_max; x++) {
-            if (!game_board_cell_is_wall(x, y)) {
-                game_paint(x, y, color);
-            }
+    int playable_w = game_board.playable_x_max + 1;
+    int total = playable_w * game_board.height;
+    int end = S.flash_pos + WARMUP_CELLS_PER_TICK;
+    if (end > total) {
+        end = total;
+    }
+    for (int i = S.flash_pos; i < end; i++) {
+        int x = i % playable_w;
+        int y = i / playable_w;
+        if (!game_board_cell_is_wall(x, y)) {
+            game_paint(x, y, color);
         }
     }
+    S.flash_pos = end;
 }
 
 /* Render the "GO" intro splash. G on the LH side (logical cols 1..3,
@@ -439,43 +465,30 @@ static void paint_full_board(uint32_t color) {
  * feel — at t=0 it's dim, peaks at t=INTRO_MS/2, settles to full
  * just before the game starts. */
 static void render_intro(void) {
-    game_paint_clear();
+    /* Don't repaint per tick — warmup already established the OFF
+     * canvas, and any per-tick brightness change would push 18 letter
+     * cells × 20 Hz = 360 BLE writes/sec, miles over the link's
+     * drain rate (~100/sec). The dirty cache absorbs subsequent
+     * tick re-renders cleanly: paint each letter once at full
+     * brightness, the cache short-circuits every later tick. */
     int64_t age = k_uptime_get() - S.phase_started_ms;
     if (age < 0) {
         age = 0;
     }
-    if (age > INTRO_MS) {
-        age = INTRO_MS;
-    }
-    /* Brightness ramp: 0..255 over the first half, hold 255 for the
-     * second half. Gives the letters a "wake up" pulse that ends on
-     * full brightness right before the game hands over to PLAYING. */
-    uint32_t brightness;
-    if (age < INTRO_MS / 2) {
-        brightness = (uint32_t)((age * 255) / (INTRO_MS / 2));
-    } else {
-        brightness = 255;
-    }
-    /* White-ish letters with a slight cyan tint so they read against
-     * the (off) background without looking sickly green. */
-    uint32_t r = brightness * 220 / 255;
-    uint32_t g = brightness * 240 / 255;
-    uint32_t b = brightness;
-    uint32_t color = GAME_COLOR((r << 16) | (g << 8) | b);
+    /* White-ish with a slight cyan tint so the letters read clearly
+     * against the off background without looking sickly green. */
+    uint32_t color = GAME_COLOR(0xDCF0FF);
     if (game_board.playable_x_max >= 11) {
         /* Full-screen: G on LH cols 1..3, O on RH cols 9..11. Both
-         * letters appear together throughout the intro because both
-         * halves are visible; the user reads "GO" on either side from
-         * the moment the splash starts. */
+         * letters appear together at t=0 — both halves are visible so
+         * the user reads "GO" simultaneously. */
         draw_glyph(glyph_G, 1, 0, color);
         draw_glyph(glyph_O, 9, 0, color);
     } else {
-        /* LH-only: 6-col strip can fit G + O side-by-side (cols 0..2
-         * and 3..5) but it looks better to sequence them so the user
-         * sees the letters land. G appears from t=0 and fades in over
-         * the first half; O joins at the halfway mark already at full
-         * brightness. By the end of the intro both letters sit lit
-         * across the LH strip. */
+        /* LH-only: G + O don't fit side-by-side at 3 cols each on a
+         * 6-col strip, but sequencing them reads better as a "GO"
+         * cue. G appears at t=0; O joins at the halfway mark on cols
+         * 3..5. By the end of the intro both letters are lit. */
         draw_glyph(glyph_G, 0, 0, color);
         if (age >= INTRO_MS / 2) {
             draw_glyph(glyph_O, 3, 0, color);
