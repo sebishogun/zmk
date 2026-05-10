@@ -63,11 +63,16 @@ LOG_MODULE_DECLARE(aurorakey_games, CONFIG_ZMK_LOG_LEVEL);
 #define MIN_TICK_MS 60
 
 enum snake_phase {
+    PHASE_INTRO,
     PHASE_PLAYING,
     PHASE_PAUSED,
     PHASE_DEAD,
     PHASE_WON,
 };
+
+#define INTRO_MS 1500
+#define FULLBOARD_FLASH_MS                                                                         \
+    400 /* DEAD / WON: flash entire board for this long, then settle into body-only */
 
 struct cell {
     int8_t x;
@@ -92,6 +97,45 @@ struct snake {
 };
 
 static struct snake S;
+
+/* ─── Intro splash ─────────────────────────────────────────────────── */
+
+/* "GO" rendered as a 3-col × 5-row bitmap per letter. G lives on the
+ * LH side (logical cols 1..3, rows 0..4); O lives on the RH side
+ * (logical cols 9..11, rows 0..4). Spans both halves visually so
+ * the user immediately sees both LEDs strips coming alive. Cells in
+ * the middle wrist gap aren't used — the splayed layout means
+ * "GO" doesn't read as continuous text either way; LH = G, RH = O
+ * is the cleanest mapping. */
+#define GLYPH_W 3
+#define GLYPH_H 5
+
+static const uint8_t glyph_G[GLYPH_H] = {
+    0b111, /* ###  */
+    0b100, /* #..  */
+    0b101, /* #.#  */
+    0b101, /* #.#  */
+    0b011, /* .##  */
+};
+static const uint8_t glyph_O[GLYPH_H] = {
+    0b010, /* .#.  */
+    0b101, /* #.#  */
+    0b101, /* #.#  */
+    0b101, /* #.#  */
+    0b010, /* .#.  */
+};
+
+static void draw_glyph(const uint8_t glyph[GLYPH_H], int origin_x, int origin_y, uint32_t color) {
+    for (int gy = 0; gy < GLYPH_H; gy++) {
+        for (int gx = 0; gx < GLYPH_W; gx++) {
+            /* Bit 2 is the leftmost column for readability of the
+             * literals above (left bit = leftmost pixel). */
+            if (glyph[gy] & (1u << (GLYPH_W - 1 - gx))) {
+                game_paint(origin_x + gx, origin_y + gy, color);
+            }
+        }
+    }
+}
 
 /* ─── Helpers ──────────────────────────────────────────────────────── */
 
@@ -205,7 +249,7 @@ static void snake_reset(void) {
     S.dy = 0;
     S.dir_buffer_len = 0;
     S.tick_ms = snake_default_tick_ms();
-    S.phase = PHASE_PLAYING;
+    S.phase = PHASE_INTRO;
     S.phase_started_ms = k_uptime_get();
     S.playable_cells = playable_cell_count();
     place_food();
@@ -334,7 +378,73 @@ static void step_playing(void) {
 
 /* ─── Render ───────────────────────────────────────────────────────── */
 
+/* Fill every cell on the playable board with `color`. Used by the
+ * full-board flash on DEAD / WON to give the user an unmistakable
+ * cue something just happened. */
+static void paint_full_board(uint32_t color) {
+    for (int y = 0; y < game_board.height; y++) {
+        for (int x = 0; x < game_board.width; x++) {
+            if (!game_board_cell_is_wall(x, y)) {
+                game_paint(x, y, color);
+            }
+        }
+    }
+}
+
+/* Render the "GO" intro splash. G on the LH side (logical cols 1..3,
+ * rows 0..4); O on the RH side (cols 9..11, rows 0..4). Both sides
+ * of the keyboard light up so the user immediately sees both halves
+ * are alive. Pulses brightness over the intro window for a "fade-in"
+ * feel — at t=0 it's dim, peaks at t=INTRO_MS/2, settles to full
+ * just before the game starts. */
+static void render_intro(void) {
+    game_paint_clear();
+    int64_t age = k_uptime_get() - S.phase_started_ms;
+    if (age < 0) {
+        age = 0;
+    }
+    if (age > INTRO_MS) {
+        age = INTRO_MS;
+    }
+    /* Brightness ramp: 0..255 over the first half, hold 255 for the
+     * second half. Gives the letters a "wake up" pulse that ends on
+     * full brightness right before the game hands over to PLAYING. */
+    uint32_t brightness;
+    if (age < INTRO_MS / 2) {
+        brightness = (uint32_t)((age * 255) / (INTRO_MS / 2));
+    } else {
+        brightness = 255;
+    }
+    /* White-ish letters with a slight cyan tint so they read against
+     * the (off) background without looking sickly green. */
+    uint32_t r = brightness * 220 / 255;
+    uint32_t g = brightness * 240 / 255;
+    uint32_t b = brightness;
+    uint32_t color = GAME_COLOR((r << 16) | (g << 8) | b);
+    /* G on LH cols 1..3, rows 0..4. */
+    draw_glyph(glyph_G, 1, 0, color);
+    /* O on RH cols 9..11, rows 0..4. */
+    draw_glyph(glyph_O, 9, 0, color);
+}
+
 static void render(void) {
+    /* Intro is its own thing — bypasses the body/food paint. */
+    if (S.phase == PHASE_INTRO) {
+        render_intro();
+        return;
+    }
+    /* DEAD / WON flash the entire board for the first ~400ms so the
+     * user gets an instant "screen flashed red/green" cue, then
+     * settle into the body-only flash for the remaining wait. */
+    int64_t age = k_uptime_get() - S.phase_started_ms;
+    if (S.phase == PHASE_DEAD && age < FULLBOARD_FLASH_MS) {
+        paint_full_board(GAME_COLOR(0xFF0000));
+        return;
+    }
+    if (S.phase == PHASE_WON && age < FULLBOARD_FLASH_MS) {
+        paint_full_board(GAME_COLOR(0x00FF00));
+        return;
+    }
     game_paint_clear();
     /* Food: red. Painted before the body so head colour wins if the
      * head ever overlaps food (it shouldn't — we transition to ate
@@ -355,14 +465,15 @@ static void render(void) {
         break;
     case PHASE_PAUSED: {
         /* Slow pulse on the body so the user knows the game is on. */
-        int64_t age = k_uptime_get() - S.phase_started_ms;
-        int phase = (int)((age / 25) % 80);
-        int amp = phase < 40 ? phase : (80 - phase); /* 0..40..0 */
-        uint8_t b = (uint8_t)(amp * 4);              /* up to ~160 */
-        head_color = GAME_COLOR((uint32_t)b << 8);   /* dim green pulse */
+        int64_t pause_age = k_uptime_get() - S.phase_started_ms;
+        int phase_t = (int)((pause_age / 25) % 80);
+        int amp = phase_t < 40 ? phase_t : (80 - phase_t); /* 0..40..0 */
+        uint8_t b = (uint8_t)(amp * 4);                    /* up to ~160 */
+        head_color = GAME_COLOR((uint32_t)b << 8);         /* dim green pulse */
         body_color = GAME_COLOR(((uint32_t)(b / 2)) << 8);
         break;
     }
+    case PHASE_INTRO: /* unreachable — handled above */
     case PHASE_PLAYING:
     default:
         head_color = GAME_COLOR(0x00FF00);
@@ -390,6 +501,12 @@ void snake_exit(void) { /* Nothing to do; runtime clears the layer's overlay. */
 void snake_tick(void) {
     int64_t now = k_uptime_get();
     switch (S.phase) {
+    case PHASE_INTRO:
+        if (now - S.phase_started_ms >= INTRO_MS) {
+            S.phase = PHASE_PLAYING;
+            S.phase_started_ms = now;
+        }
+        break;
     case PHASE_PLAYING:
         step_playing();
         break;
@@ -433,7 +550,11 @@ void snake_input(uint32_t position) {
         }
         break;
     case KEY_LH_START:
-        if (S.phase == PHASE_PLAYING) {
+        if (S.phase == PHASE_INTRO) {
+            /* Skip the splash — start playing immediately. */
+            S.phase = PHASE_PLAYING;
+            S.phase_started_ms = k_uptime_get();
+        } else if (S.phase == PHASE_PLAYING) {
             enter_phase(PHASE_PAUSED);
         } else if (S.phase == PHASE_PAUSED) {
             enter_phase(PHASE_PLAYING);
@@ -452,9 +573,10 @@ void snake_input(uint32_t position) {
 }
 
 int snake_tick_ms(void) {
-    /* DEAD / WON freeze: render at 50 ms for the flash animation,
-     * gameplay tick honour S.tick_ms otherwise. */
-    if (S.phase == PHASE_DEAD || S.phase == PHASE_WON || S.phase == PHASE_PAUSED) {
+    /* INTRO / PAUSED / DEAD / WON tick at 50 ms so the splash + flash
+     * animations look smooth. Gameplay tick honours S.tick_ms. */
+    if (S.phase == PHASE_INTRO || S.phase == PHASE_PAUSED || S.phase == PHASE_DEAD ||
+        S.phase == PHASE_WON) {
         return 50;
     }
     return S.tick_ms;
