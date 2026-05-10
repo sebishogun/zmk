@@ -234,3 +234,61 @@ config AURORAKEY_RGB_AUTO_OFF_DELAY_MS
     depends on ZMK_RGB_UNDERGLOW && ZMK_RGB_UNDERGLOW_AUTO_OFF_IDLE
     default 0
     range 0 3600000
+
+# AuroraKey: on-keyboard mini-games rendered on the per-key RGB LEDs.
+# Each game opt-in via its own bool; the runtime is gated by "any game
+# enabled" so the binary stays unchanged when the user hasn't picked
+# any. CONFIG_AURORAKEY_GAME_LAYER selects which keymap layer activates
+# the game runtime — entering that layer hands the LED buffer + position
+# events to the active game; leaving it restores normal keymap dispatch
+# and underglow rendering. Central-only — the game state lives on LH and
+# pushes per-pixel colours to RH via the existing UPDATE_RGB_COLOR
+# split-bt fanout.
+menuconfig AURORAKEY_GAMES
+    bool "AuroraKey: on-keyboard mini-games on per-key RGB"
+    depends on ZMK_RGB_UNDERGLOW && EXPERIMENTAL_RGB_LAYER
+    depends on !ZMK_SPLIT || ZMK_SPLIT_ROLE_CENTRAL
+
+if AURORAKEY_GAMES
+
+config AURORAKEY_GAME_LAYER
+    int "AuroraKey: keymap layer index that activates the game runtime"
+    default 0
+    range 0 31
+
+config AURORAKEY_GAME_TICK_MS
+    int "AuroraKey: default game tick interval (ms)"
+    default 200
+    range 50 2000
+
+config AURORAKEY_GAME_SNAKE
+    bool "AuroraKey: Snake"
+    default y
+
+if AURORAKEY_GAME_SNAKE
+
+config AURORAKEY_GAME_SNAKE_TICK_MS
+    int "AuroraKey: Snake tick interval (ms) — falls back to GAME_TICK_MS when 0"
+    default 200
+    range 60 2000
+
+config AURORAKEY_GAME_SNAKE_WRAP
+    bool "AuroraKey: Snake wraps around edges (torus topology)"
+    default y
+
+config AURORAKEY_GAME_SNAKE_ACCEL_PCT
+    int "AuroraKey: Snake speedup percent per food eaten (0 = constant speed)"
+    default 0
+    range 0 50
+
+endif # AURORAKEY_GAME_SNAKE
+
+config AURORAKEY_GAME_CONWAY
+    bool "AuroraKey: Conway's Game of Life (stub for v2)"
+    default n
+
+config AURORAKEY_GAME_CONNECT4
+    bool "AuroraKey: Connect 4 (stub for v2)"
+    default n
+
+endif # AURORAKEY_GAMES
