@@ -75,17 +75,17 @@ static uint32_t game_layer_id = 0;
  * cells (old tail off, new head on, maybe food), so fanout drops
  * from 80/tick to ~5/tick and the BLE link comfortably keeps up. */
 static uint32_t last_pushed[ZMK_KEYMAP_LEN];
-/* On game entry we issue a single split-bt clear_layer (opcode 0x04)
- * to the peripheral, which wipes its pending + live overlay for our
- * layer in one BLE write instead of 80. After that we KNOW the
- * peripheral's cells are unset (renderer falls through to whatever
- * the game layer's normal DT bindings render), so we mark our local
- * cache as "off" — paint_one with off colour matches and stays a
- * no-op for cells the game doesn't actively light. Net traffic:
- * 1 clear + N lit cells per frame, instead of 80 cells per frame. */
-static void cache_reset_to_off(void) {
+/* Sentinel value: no real packed colour can equal this (high bit set
+ * + low bit clear in a slot reserved by GAME_COLOR macro). Seeding the
+ * cache with sentinel forces the very first paint per cell to actually
+ * call stage_set + fanout — we MUST create an explicit overlay entry
+ * (even for OFF / black cells) because otherwise the renderer falls
+ * through to the layer's DT-baked colour and the user sees stock
+ * underglow bleeding through under the game. */
+#define CACHE_UNKNOWN 0xFFFFFFFEu
+static void cache_reset_unknown(void) {
     for (int i = 0; i < ZMK_KEYMAP_LEN; i++) {
-        last_pushed[i] = GAME_COLOR_OFF;
+        last_pushed[i] = CACHE_UNKNOWN;
     }
 }
 
@@ -114,7 +114,15 @@ static void paint_one(int pos, uint32_t color) {
     }
     zmk_rgb_underglow_layer_stage_set(game_layer_id, (uint32_t)pos, color);
 #if GAME_FANOUT_TO_PERIPHERAL
-    zmk_split_central_update_rgb_color(game_layer_id, (uint32_t)pos, color);
+    int err = zmk_split_central_update_rgb_color(game_layer_id, (uint32_t)pos, color);
+    if (err < 0) {
+        /* msgq full (-EAGAIN) or other transient BLE error. Leave the
+         * cache stale so next tick's paint pass retries this cell.
+         * Central-side stage_set already succeeded so LH renders this
+         * frame correctly; RH catches up within 1–2 ticks as the
+         * peripheral msgq drains. */
+        return;
+    }
 #endif
     last_pushed[pos] = color;
 }
@@ -200,19 +208,16 @@ static void activate(void) {
     }
     game_layer_id = (uint32_t)zmk_keymap_layer_index_to_id((zmk_keymap_layer_index_t)GAME_LAYER);
     game_active = true;
-    /* Wipe the layer's overlay on BOTH halves before painting the
-     * first frame. Single split-bt write (clear_layer = opcode 0x04)
-     * instead of 80 individual cell pushes — the BLE link can absorb
-     * one packet but flooding 80 in a burst trashes the central's
-     * msgq, drops most writes, and RH ends up rendering a half-frame.
-     * After the clear we know peripheral has nothing for our layer
-     * so cache_reset_to_off matches reality and paint_one(off) on
-     * unlit cells skips fanout cleanly. */
-    zmk_rgb_underglow_layer_clear(game_layer_id);
-#if GAME_FANOUT_TO_PERIPHERAL
-    zmk_split_central_rgb_clear_layer(game_layer_id);
-#endif
-    cache_reset_to_off();
+    /* Don't call layer_clear here. layer_clear wipes the overlay
+     * masks (no per-key entry for the cell) which causes the renderer
+     * to fall back to the layer's DT-baked colour for unlit cells —
+     * stock underglow bleeds through under the game. Instead we leave
+     * the cache as CACHE_UNKNOWN so the first paint_one(OFF) on every
+     * cell creates an explicit black overlay entry. The 80-cell warm-
+     * up burst over the GO splash drains naturally through the BLE
+     * msgq (with retry-on-EAGAIN in paint_one); steady-state cost
+     * once the snake is moving is ~5 cells/tick. */
+    cache_reset_unknown();
     LOG_INF("game enter (layer index=%d, layer_id=%u)", (int)GAME_LAYER, game_layer_id);
     dispatch_enter();
     /* First tick fires immediately so the user sees the initial frame
@@ -231,12 +236,14 @@ static void deactivate(void) {
     k_work_cancel_delayable(&tick_work);
     /* Release every pixel we painted — the game layer falls back to
      * whatever the editor configured (or the layer default). One
-     * clear-layer fanout to RH so it stops rendering our pixels too. */
+     * clear-layer fanout to RH so it stops rendering our pixels too.
+     * On exit we WANT the DT fallback: the user is leaving the game
+     * and the layer's normal appearance should return. */
     zmk_rgb_underglow_layer_clear(game_layer_id);
 #if GAME_FANOUT_TO_PERIPHERAL
     zmk_split_central_rgb_clear_layer(game_layer_id);
 #endif
-    cache_reset_to_off();
+    cache_reset_unknown();
 }
 
 /* ─── Event listeners ─────────────────────────────────────────────── */

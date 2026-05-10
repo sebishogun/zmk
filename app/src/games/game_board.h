@@ -25,6 +25,12 @@ struct game_board {
     /* Logical grid dimensions. */
     int width;
     int height;
+    /* Inclusive max-x for spawn / food / wrap. Lets games confine
+     * mechanics to a sub-rectangle of the full board — used so LH-only
+     * mode (CONFIG_AURORAKEY_GAME_FULL_SCREEN=n) doesn't spawn food on
+     * RH cells the runtime doesn't paint. Always equals width-1 in
+     * full-screen mode. */
+    int playable_x_max;
     /* Translate (x, y) → matrix position in [0, ZMK_KEYMAP_LEN) on
      * success, or -1 if the cell has no physical key (wall / gap).
      * Negative coordinates are normalised by the caller; impl can

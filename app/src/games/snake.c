@@ -147,7 +147,7 @@ static int wrap(int v, int max) {
 static int playable_cell_count(void) {
     int n = 0;
     for (int y = 0; y < game_board.height; y++) {
-        for (int x = 0; x < game_board.width; x++) {
+        for (int x = 0; x <= game_board.playable_x_max; x++) {
             if (!game_board_cell_is_wall(x, y)) {
                 n++;
             }
@@ -172,8 +172,9 @@ static void place_food(void) {
      * scan if RNG keeps landing on the body (only matters when the
      * snake fills most of the board). Accepts walls in the bounded
      * loop so we don't bias against rare empty cells. */
+    uint32_t playable_w = (uint32_t)(game_board.playable_x_max + 1);
     for (int i = 0; i < 64; i++) {
-        int x = (int)(sys_rand32_get() % (uint32_t)game_board.width);
+        int x = (int)(sys_rand32_get() % playable_w);
         int y = (int)(sys_rand32_get() % (uint32_t)game_board.height);
         if (game_board_cell_is_wall(x, y)) {
             continue;
@@ -187,7 +188,7 @@ static void place_food(void) {
     }
     /* Fallback: scan in row-major order. */
     for (int y = 0; y < game_board.height; y++) {
-        for (int x = 0; x < game_board.width; x++) {
+        for (int x = 0; x <= game_board.playable_x_max; x++) {
             if (game_board_cell_is_wall(x, y)) {
                 continue;
             }
@@ -207,27 +208,37 @@ static int snake_default_tick_ms(void) {
     int v = CONFIG_AURORAKEY_GAME_SNAKE_TICK_MS;
     if (v <= 0)
         v = CONFIG_AURORAKEY_GAME_TICK_MS;
-    return v;
 #else
-    return CONFIG_AURORAKEY_GAME_TICK_MS;
+    int v = CONFIG_AURORAKEY_GAME_TICK_MS;
 #endif
+    /* Tighter playable area → quicker feel. LH-only's 6-col strip
+     * needs ~75% of the full-screen tick to play right; same 200 ms
+     * on a half-width board makes the snake feel sluggish because
+     * reaction distance is shorter. */
+    if (game_board.playable_x_max < game_board.width - 1) {
+        v = (v * 3) / 4;
+    }
+    return v;
 }
 
 static void snake_reset(void) {
     memset(&S, 0, sizeof(S));
     S.len = 3;
-    /* Spawn near the centre of the playable area on a non-wall row. */
-    int cx = game_board.width / 2;
+    /* Spawn near the centre of the playable area on a non-wall row.
+     * Anchored on playable_x_max so LH-only mode (6-col strip) spawns
+     * the snake on the LH side, not floating on the wrist gap. */
+    int playable_w = game_board.playable_x_max + 1;
+    int cx = playable_w / 2;
     int cy = game_board.height / 2;
     /* Walk left until we find 3 consecutive non-wall cells for the
      * starting body. If the board is degenerate (no such run) we fall
      * back to the first non-wall cell. */
     int sx = cx, sy = cy;
-    for (int probe = 0; probe < game_board.width; probe++) {
-        int x = wrap(cx - probe, game_board.width);
+    for (int probe = 0; probe < playable_w; probe++) {
+        int x = wrap(cx - probe, playable_w);
         bool ok = true;
         for (int k = 0; k < 3; k++) {
-            int xk = wrap(x + k, game_board.width);
+            int xk = wrap(x + k, playable_w);
             if (game_board_cell_is_wall(xk, cy)) {
                 ok = false;
                 break;
@@ -239,9 +250,9 @@ static void snake_reset(void) {
             break;
         }
     }
-    S.body[0].x = (int8_t)wrap(sx + 2, game_board.width);
+    S.body[0].x = (int8_t)wrap(sx + 2, playable_w);
     S.body[0].y = (int8_t)sy;
-    S.body[1].x = (int8_t)wrap(sx + 1, game_board.width);
+    S.body[1].x = (int8_t)wrap(sx + 1, playable_w);
     S.body[1].y = (int8_t)sy;
     S.body[2].x = (int8_t)sx;
     S.body[2].y = (int8_t)sy;
@@ -313,26 +324,29 @@ static void step_playing(void) {
     consume_one_buffered_direction();
     int nx = S.body[0].x + S.dx;
     int ny = S.body[0].y + S.dy;
+    int playable_w = game_board.playable_x_max + 1;
     bool wrap_enabled = IS_ENABLED(CONFIG_AURORAKEY_GAME_SNAKE_WRAP);
     if (wrap_enabled) {
-        nx = wrap(nx, game_board.width);
+        /* Wrap on the playable strip width, not the full board width —
+         * keeps the snake on cells the user can see. */
+        nx = wrap(nx, playable_w);
         ny = wrap(ny, game_board.height);
     } else {
-        if (nx < 0 || nx >= game_board.width || ny < 0 || ny >= game_board.height) {
+        if (nx < 0 || nx >= playable_w || ny < 0 || ny >= game_board.height) {
             enter_phase(PHASE_DEAD);
             return;
         }
     }
     /* Step over wall cells: continue in the same direction, with a
      * bounded safety so a fully-walled row doesn't hang the tick. */
-    int safety = game_board.width + game_board.height;
+    int safety = playable_w + game_board.height;
     while (game_board_cell_is_wall(nx, ny) && safety-- > 0) {
         nx += S.dx;
         ny += S.dy;
         if (wrap_enabled) {
-            nx = wrap(nx, game_board.width);
+            nx = wrap(nx, playable_w);
             ny = wrap(ny, game_board.height);
-        } else if (nx < 0 || nx >= game_board.width || ny < 0 || ny >= game_board.height) {
+        } else if (nx < 0 || nx >= playable_w || ny < 0 || ny >= game_board.height) {
             enter_phase(PHASE_DEAD);
             return;
         }
@@ -383,7 +397,7 @@ static void step_playing(void) {
  * cue something just happened. */
 static void paint_full_board(uint32_t color) {
     for (int y = 0; y < game_board.height; y++) {
-        for (int x = 0; x < game_board.width; x++) {
+        for (int x = 0; x <= game_board.playable_x_max; x++) {
             if (!game_board_cell_is_wall(x, y)) {
                 game_paint(x, y, color);
             }
@@ -423,8 +437,13 @@ static void render_intro(void) {
     uint32_t color = GAME_COLOR((r << 16) | (g << 8) | b);
     /* G on LH cols 1..3, rows 0..4. */
     draw_glyph(glyph_G, 1, 0, color);
-    /* O on RH cols 9..11, rows 0..4. */
-    draw_glyph(glyph_O, 9, 0, color);
+    /* O on RH cols 9..11, rows 0..4 — only when the playable area
+     * actually reaches that column. In LH-only mode (playable_x_max=5)
+     * the O cells aren't rendered, so just show the G; the user still
+     * gets a clear "GO" cue from the single letter waking up. */
+    if (game_board.playable_x_max >= 11) {
+        draw_glyph(glyph_O, 9, 0, color);
+    }
 }
 
 static void render(void) {

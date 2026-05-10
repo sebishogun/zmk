@@ -18,10 +18,24 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <zephyr/kernel.h>
+
 #include "game_board.h"
 
 #define W 14
 #define H 6
+/* Playable column range. Full-screen mode = 0..13 (the full Glove80).
+ * LH-only mode = 0..5 (LH columns only — cols 6,7 are the wrist gap,
+ * 8..13 are the RH side). Compile-time gated off the same Kconfig
+ * that controls the split-bt fanout, so the build is guaranteed
+ * self-consistent: a UF2 with peripheral fanout enabled has the full
+ * 14-col playable area; a UF2 without fanout has the snake confined
+ * to the LH strip the user can actually see. */
+#if IS_ENABLED(CONFIG_AURORAKEY_GAME_FULL_SCREEN)
+#define PLAYABLE_X_MAX (W - 1)
+#else
+#define PLAYABLE_X_MAX 5
+#endif
 
 /* Row-major lookup: -1 = wall, else matrix position 0..79. The middle
  * columns (6, 7) on rows 0–3 are wrist gap; row 5 has narrow side
@@ -45,5 +59,6 @@ static int glove80_xy_to_pos(int x, int y) {
 const struct game_board game_board = {
     .width = W,
     .height = H,
+    .playable_x_max = PLAYABLE_X_MAX,
     .xy_to_pos = glove80_xy_to_pos,
 };
