@@ -1,23 +1,20 @@
 /*
- * AuroraKey games — runtime orchestrator.
+ * AuroraKey games — runtime orchestrator (v2, multi-game).
  *
  * Subscribes to layer-state-changed and position-state-changed.
  * On entering CONFIG_AURORAKEY_GAME_LAYER, dispatches enter / tick /
- * input to the active game module. On leaving, dispatches exit and
- * releases the per-key Studio overlay so normal layer rendering
- * resumes.
+ * input to the ACTIVE game module. On leaving, dispatches exit and
+ * releases the per-key Studio overlay so normal layer rendering resumes.
  *
- * Architecture is single-game-active-at-a-time: only one module's
- * Kconfig should be set per build. If multiple are set the runtime
- * picks the first compiled-in one (Snake → Conway → Connect4) — the
- * editor's codegen normally enforces single-select but this falls
- * back gracefully if a hand-edited config slips through.
+ * v2: multiple games can be compiled in at once. Each game exports a
+ * `const struct game_module` (vtable). The runtime keeps a registry of
+ * the compiled-in modules and one `active` index. The reserved CYCLE
+ * key (GKEY_CYCLE=72) advances to the next game: exit current → clear →
+ * brief name-glyph splash → enter next. EXIT (53) leaves the layer.
  *
- * Re-renders every tick rather than tracking dirty regions: the
- * board has 80 keys max, paint cost is negligible (~80 atomic stores
- * + a single split-bt fanout the renderer batches), and re-render
- * recovers from any concurrent USB Studio writes that may have
- * scribbled on the game layer mid-frame.
+ * Everything renders on the physical keyboard's per-key RGB only — the
+ * Studio overlay on the game layer, fanned out to the peripheral over
+ * split-bt. There is no off-keyboard preview.
  *
  * Copyright (c) 2026 The ZMK Contributors / AuroraKey
  * SPDX-License-Identifier: MIT
@@ -45,49 +42,35 @@ LOG_MODULE_REGISTER(aurorakey_games, CONFIG_ZMK_LOG_LEVEL);
 #endif
 
 #include "game_board.h"
+#include "game_render.h"
 #include "game_runtime.h"
 
 #if IS_ENABLED(CONFIG_AURORAKEY_GAMES)
 
+#if !IS_ENABLED(CONFIG_AURORAKEY_GAME_SNAKE) && !IS_ENABLED(CONFIG_AURORAKEY_GAME_CONWAY) &&         \
+    !IS_ENABLED(CONFIG_AURORAKEY_GAME_CONNECT4)
+#error "CONFIG_AURORAKEY_GAMES=y requires at least one game module enabled"
+#endif
+
 #define GAME_LAYER CONFIG_AURORAKEY_GAME_LAYER
 #define EXIT_POS CONFIG_AURORAKEY_GAME_EXIT_POSITION
 
-/* Glove80 thumb-cluster matrix positions used as game inputs.
- * RH cluster D-pad layout:
- *   top row    [ 55  56  57 ]   left up right
- *   bottom row [ 72  73  74 ]   . down .
- * Bottom-middle alone for down so the thumb can rest naturally. */
-#define KEY_LH_START 52
-#define KEY_LH_RESET 54
-#define KEY_RH_LEFT 55
-#define KEY_RH_UP 56
-#define KEY_RH_RIGHT 57
-#define KEY_RH_DOWN 73
+/* Duration of the name-glyph flash shown when cycling games. */
+#define SPLASH_MS 700
 
 static bool game_active = false;
 static uint32_t game_layer_id = 0;
 
-/* Per-key cache of the colour we last pushed over split-bt to the
- * peripheral. Re-painting the same colour is a no-op for the user
- * and adds wasteful traffic on the BLE link — at 80 cells × 5 Hz
- * tick = 400 writes/sec, the central's split-bt msgq fills up
- * (typical capacity ~16), the EAGAIN handler evicts the oldest
- * write, and most of the frame's pixels get dropped en route to
- * RH. Result: RH renders a corrupt half-frame or just falls back
- * to the layer's normal colours.
- *
- * With this dirty cache we only fanout cells whose colour actually
- * changed since the last paint. A typical Snake frame mutates ~5
- * cells (old tail off, new head on, maybe food), so fanout drops
- * from 80/tick to ~5/tick and the BLE link comfortably keeps up. */
+/* Per-key cache of the colour we last pushed over split-bt. Re-painting
+ * the same colour is a no-op for the user and wasteful on the BLE link:
+ * at 80 cells × 5 Hz = 400 writes/sec the central's split-bt msgq (cap
+ * ~16) fills, the EAGAIN handler evicts the oldest write, and most of
+ * the frame's pixels never reach RH. With this dirty cache we only fan
+ * out cells whose colour actually changed. */
 static uint32_t last_pushed[ZMK_KEYMAP_LEN];
-/* Sentinel value: no real packed colour can equal this (high bit set
- * + low bit clear in a slot reserved by GAME_COLOR macro). Seeding the
- * cache with sentinel forces the very first paint per cell to actually
- * call stage_set + fanout — we MUST create an explicit overlay entry
- * (even for OFF / black cells) because otherwise the renderer falls
- * through to the layer's DT-baked colour and the user sees stock
- * underglow bleeding through under the game. */
+/* Sentinel no real packed colour can equal — seeding the cache with it
+ * forces the first paint of each cell to create an explicit overlay
+ * entry (even for OFF), so stock DT underglow can't bleed through. */
 #define CACHE_UNKNOWN 0xFFFFFFFEu
 static void cache_reset_unknown(void) {
     for (int i = 0; i < ZMK_KEYMAP_LEN; i++) {
@@ -97,20 +80,6 @@ static void cache_reset_unknown(void) {
 
 /* ─── Public paint API ─────────────────────────────────────────────── */
 
-/* paint_one writes a single pixel to BOTH the central's local
- * pending overlay AND the peripheral via the split-bt UPDATE_RGB_COLOR
- * opcode 0x01 fanout. Without the fanout step the RH-strip pixels
- * stay dark and the game only renders on LH — exactly what we hit
- * before this fix. Mirrors the Studio set_key_color RPC handler at
- * rgb_subsystem.c:37-44, which has stage_set + split_central_update_rgb_color
- * in the same function for the same reason.
- *
- * Dirty-cache: skip both the local stage_set AND the split-bt fanout
- * when the colour matches what we last pushed for this cell. Local
- * stage_set is cheap (atomic store + mask bit) but skipping it keeps
- * the renderer's per-tick work proportional to the diff, not the
- * board size. The fanout skip is the critical part — it stops the
- * msgq flood that drops RH frames. */
 static void paint_one(int pos, uint32_t color) {
     if (pos < 0 || pos >= ZMK_KEYMAP_LEN) {
         return;
@@ -122,11 +91,9 @@ static void paint_one(int pos, uint32_t color) {
 #if GAME_FANOUT_TO_PERIPHERAL
     int err = zmk_split_central_update_rgb_color(game_layer_id, (uint32_t)pos, color);
     if (err < 0) {
-        /* msgq full (-EAGAIN) or other transient BLE error. Leave the
-         * cache stale so next tick's paint pass retries this cell.
-         * Central-side stage_set already succeeded so LH renders this
-         * frame correctly; RH catches up within 1–2 ticks as the
-         * peripheral msgq drains. */
+        /* msgq full (-EAGAIN) or transient BLE error. Leave the cache
+         * stale so the next paint pass retries this cell; LH already
+         * rendered correctly, RH catches up within 1–2 ticks. */
         return;
     }
 #endif
@@ -154,38 +121,104 @@ void game_paint_clear(void) {
     }
 }
 
+void game_paint_pos(uint32_t pos, uint32_t color) {
+    if (!game_active) {
+        return;
+    }
+    paint_one((int)pos, color);
+}
+
+void game_clear_all(void) {
+    if (!game_active) {
+        return;
+    }
+    for (int p = 0; p < ZMK_KEYMAP_LEN; p++) {
+        paint_one(p, GAME_COLOR_OFF);
+    }
+}
+
+/* The 12 thumb-cluster keys are NOT on the logical grid, so
+ * game_paint_clear() (grid-only) never touches them — historically they
+ * kept their DT-baked layer colour under the game ("colours not cleared
+ * on start"). Clearing just these 12 on activation fixes that without
+ * the 80-cell burst a full clear would cost on a fresh canvas. Games
+ * then paint their control legend on top. */
+static const uint8_t thumb_keys[] = {GKEY_LH_TL, GKEY_EXIT,  GKEY_LH_TR, GKEY_RH_TL,
+                                     GKEY_RH_TM, GKEY_RH_TR, GKEY_LH_BL, GKEY_LH_BM,
+                                     GKEY_LH_BR, GKEY_CYCLE, GKEY_RH_BM, GKEY_RH_BR};
+static void clear_thumb(void) {
+    for (size_t i = 0; i < ARRAY_SIZE(thumb_keys); i++) {
+        paint_one((int)thumb_keys[i], GAME_COLOR_OFF);
+    }
+}
+
+/* ─── Game registry (compiled-in modules) ──────────────────────────── */
+
+static const struct game_module *const games[] = {
+#if IS_ENABLED(CONFIG_AURORAKEY_GAME_SNAKE)
+    &snake_module,
+#endif
+#if IS_ENABLED(CONFIG_AURORAKEY_GAME_CONWAY)
+    &conway_module,
+#endif
+#if IS_ENABLED(CONFIG_AURORAKEY_GAME_CONNECT4)
+    &connect4_module,
+#endif
+};
+#define N_GAMES ((int)ARRAY_SIZE(games))
+
+/* Persisted across activations so re-entering the layer resumes the
+ * last-played game. */
+static int active = 0;
+
+enum run_mode { MODE_PLAYING, MODE_SPLASH };
+static enum run_mode mode = MODE_PLAYING;
+static int64_t splash_started = 0;
+
+static const struct game_module *cur(void) { return games[active]; }
+
 /* ─── Module dispatch helpers ──────────────────────────────────────── */
 
 static void dispatch_enter(void) {
-#if IS_ENABLED(CONFIG_AURORAKEY_GAME_SNAKE)
-    snake_enter();
-#endif
+    if (cur()->enter) {
+        cur()->enter();
+    }
 }
-
 static void dispatch_exit(void) {
-#if IS_ENABLED(CONFIG_AURORAKEY_GAME_SNAKE)
-    snake_exit();
-#endif
+    if (cur()->exit) {
+        cur()->exit();
+    }
 }
-
 static void dispatch_tick(void) {
-#if IS_ENABLED(CONFIG_AURORAKEY_GAME_SNAKE)
-    snake_tick();
-#endif
+    if (cur()->tick) {
+        cur()->tick();
+    }
 }
-
 static void dispatch_input(uint32_t position) {
-#if IS_ENABLED(CONFIG_AURORAKEY_GAME_SNAKE)
-    snake_input(position);
-#endif
+    if (cur()->input) {
+        cur()->input(position);
+    }
+}
+static int dispatch_tick_ms(void) {
+    if (cur()->tick_ms) {
+        return cur()->tick_ms();
+    }
+    return CONFIG_AURORAKEY_GAME_TICK_MS;
 }
 
-static int dispatch_tick_ms(void) {
-#if IS_ENABLED(CONFIG_AURORAKEY_GAME_SNAKE)
-    return snake_tick_ms();
-#else
-    return CONFIG_AURORAKEY_GAME_TICK_MS;
-#endif
+/* Draw the active game's name glyph for the cycle splash. Both halves
+ * in full-screen mode (so the switch reads on the whole board), LH-only
+ * otherwise. */
+static void draw_splash(void) {
+    const struct game_module *g = cur();
+    if (!g->glyph) {
+        return;
+    }
+    uint32_t color = g->glyph_color ? g->glyph_color : GAME_COLOR(0xFFFFFF);
+    game_draw_glyph(g->glyph, 1, 0, color);
+    if (game_board.playable_x_max >= 11) {
+        game_draw_glyph(g->glyph, 9, 0, color);
+    }
 }
 
 /* ─── Tick timer ───────────────────────────────────────────────────── */
@@ -198,6 +231,21 @@ static void tick_handler(struct k_work *work) {
     if (!game_active) {
         return;
     }
+    if (mode == MODE_SPLASH) {
+        if (k_uptime_get() - splash_started >= SPLASH_MS) {
+            game_clear_all();
+            mode = MODE_PLAYING;
+            dispatch_enter();
+            int next = dispatch_tick_ms();
+            if (next < 20) {
+                next = 20;
+            }
+            k_work_reschedule(&tick_work, K_MSEC(next));
+        } else {
+            k_work_reschedule(&tick_work, K_MSEC(50));
+        }
+        return;
+    }
     dispatch_tick();
     int next = dispatch_tick_ms();
     if (next < 20) {
@@ -206,29 +254,43 @@ static void tick_handler(struct k_work *work) {
     k_work_reschedule(&tick_work, K_MSEC(next));
 }
 
-/* ─── Activation / deactivation ───────────────────────────────────── */
+/* ─── Cycle to the next game ────────────────────────────────────────── */
+
+static void cycle_to_next(void) {
+    if (N_GAMES <= 1) {
+        return; /* nothing to cycle to */
+    }
+    dispatch_exit();
+    game_clear_all();
+    active = (active + 1) % N_GAMES;
+    mode = MODE_SPLASH;
+    splash_started = k_uptime_get();
+    LOG_INF("game cycle -> %s", cur()->name);
+    draw_splash();
+    k_work_reschedule(&tick_work, K_MSEC(50));
+}
+
+/* ─── Activation / deactivation ───────────────────────────────────────── */
 
 static void activate(void) {
     if (game_active) {
         return;
     }
+    if (N_GAMES <= 0) {
+        return;
+    }
     game_layer_id = (uint32_t)zmk_keymap_layer_index_to_id((zmk_keymap_layer_index_t)GAME_LAYER);
     game_active = true;
-    /* Don't call layer_clear here. layer_clear wipes the overlay
-     * masks (no per-key entry for the cell) which causes the renderer
-     * to fall back to the layer's DT-baked colour for unlit cells —
-     * stock underglow bleeds through under the game. Instead we leave
-     * the cache as CACHE_UNKNOWN so the first paint_one(OFF) on every
-     * cell creates an explicit black overlay entry. The 80-cell warm-
-     * up burst over the GO splash drains naturally through the BLE
-     * msgq (with retry-on-EAGAIN in paint_one); steady-state cost
-     * once the snake is moving is ~5 cells/tick. */
+    mode = MODE_PLAYING;
+    /* Leave the cache CACHE_UNKNOWN so the first paint of each grid cell
+     * creates an explicit overlay entry (the game warms the grid up).
+     * Clear the 12 thumb keys now (they're off-grid) so they don't bleed
+     * the layer's colour before the game paints its control legend. */
     cache_reset_unknown();
-    LOG_INF("game enter (layer index=%d, layer_id=%u)", (int)GAME_LAYER, game_layer_id);
+    clear_thumb();
+    LOG_INF("game enter: %s (layer index=%d, id=%u)", cur()->name, (int)GAME_LAYER, game_layer_id);
     dispatch_enter();
-    /* First tick fires immediately so the user sees the initial frame
-     * the moment they enter the layer; subsequent ticks honour the
-     * module's requested interval. */
+    /* First tick immediately so the initial frame shows on entry. */
     k_work_reschedule(&tick_work, K_NO_WAIT);
 }
 
@@ -237,14 +299,17 @@ static void deactivate(void) {
         return;
     }
     LOG_INF("game exit");
-    dispatch_exit();
+    /* Only the active game is "entered" in PLAYING mode; in SPLASH we've
+     * already exited the previous game and not yet entered the next, so
+     * don't call exit() on a module that never entered. */
+    if (mode == MODE_PLAYING) {
+        dispatch_exit();
+    }
     game_active = false;
+    mode = MODE_PLAYING;
     k_work_cancel_delayable(&tick_work);
-    /* Release every pixel we painted — the game layer falls back to
-     * whatever the editor configured (or the layer default). One
-     * clear-layer fanout to RH so it stops rendering our pixels too.
-     * On exit we WANT the DT fallback: the user is leaving the game
-     * and the layer's normal appearance should return. */
+    /* Release every pixel we painted — the layer falls back to its
+     * configured colours. One clear-layer fanout so RH stops too. */
     zmk_rgb_underglow_layer_clear(game_layer_id);
 #if GAME_FANOUT_TO_PERIPHERAL
     zmk_split_central_rgb_clear_layer(game_layer_id);
@@ -276,34 +341,41 @@ static int on_position_state(const zmk_event_t *eh) {
     if (!ev) {
         return ZMK_EV_EVENT_BUBBLE;
     }
-    /* Releases pass through silently — gameplay is press-driven; we
-     * still want releases to clear any pressed-key state the kernel
-     * tracks so we don't leave anything stuck after exiting the
-     * layer. */
+    /* Releases pass through silently — gameplay is press-driven. */
     if (!ev->state) {
         return ZMK_EV_EVENT_HANDLED;
     }
-    /* Exit key: switch the keymap back to layer 0 (base). The layer-
-     * state listener picks up the change and runs game_exit cleanup. */
+    /* Exit key: switch back to layer 0; the layer listener runs cleanup. */
     if ((int)ev->position == EXIT_POS) {
         zmk_keymap_layer_to(zmk_keymap_layer_index_to_id(0), false);
         return ZMK_EV_EVENT_HANDLED;
     }
-    /* Game inputs: thumb-cluster keys handled by the active module. */
+    /* Cycle key: next game (no-op with a single game compiled in). */
+    if (ev->position == GKEY_CYCLE) {
+        cycle_to_next();
+        return ZMK_EV_EVENT_HANDLED;
+    }
+    /* Ignore gameplay input during the cycle splash. */
+    if (mode == MODE_SPLASH) {
+        return ZMK_EV_EVENT_HANDLED;
+    }
+    /* Forward the rest of the thumb cluster to the active game. */
     switch (ev->position) {
-    case KEY_LH_START:
-    case KEY_LH_RESET:
-    case KEY_RH_UP:
-    case KEY_RH_DOWN:
-    case KEY_RH_LEFT:
-    case KEY_RH_RIGHT:
+    case GKEY_LH_TL:
+    case GKEY_LH_TR:
+    case GKEY_RH_TL:
+    case GKEY_RH_TM:
+    case GKEY_RH_TR:
+    case GKEY_LH_BL:
+    case GKEY_LH_BM:
+    case GKEY_LH_BR:
+    case GKEY_RH_BM:
+    case GKEY_RH_BR:
         dispatch_input(ev->position);
         return ZMK_EV_EVENT_HANDLED;
     default:
-        /* Every other key on the game layer is silently consumed so
-         * the user can't accidentally type letters mid-snake. The
-         * dedicated layer + intercept-all is the production UX
-         * contract: a game layer is for the game only. */
+        /* Every other key on the game layer is silently consumed so the
+         * user can't accidentally type mid-game. */
         return ZMK_EV_EVENT_HANDLED;
     }
 }
@@ -311,23 +383,15 @@ static int on_position_state(const zmk_event_t *eh) {
 ZMK_LISTENER(aurorakey_game_input, on_position_state);
 ZMK_SUBSCRIPTION(aurorakey_game_input, zmk_position_state_changed);
 
-/* Force-deactivate the game when the keyboard transitions to IDLE /
- * SLEEP. Two reasons:
- *  - The 50 ms tick work loop would otherwise keep firing right up
- *    until sys_poweroff, fighting the activity manager for the system
- *    work queue and adding scheduling pressure during sleep transition.
- *  - On wake (post-poweroff fresh boot) the keymap defaults to the
- *    base layer, so we wouldn't auto-activate anyway — but if the
- *    keymap retained the game layer somehow, deactivate-on-sleep
- *    means we cleanly cancel pending work and release the overlay
- *    before powering off, no half-state surviving the boundary. */
+/* Force-deactivate on IDLE / SLEEP so the tick loop doesn't fight the
+ * activity manager during the sleep transition, and we cleanly cancel
+ * work + release the overlay before power-off. */
 static int on_activity_state(const zmk_event_t *eh) {
     const struct zmk_activity_state_changed *ev = as_zmk_activity_state_changed(eh);
     if (!ev) {
         return ZMK_EV_EVENT_BUBBLE;
     }
-    if (game_active &&
-        (ev->state == ZMK_ACTIVITY_IDLE || ev->state == ZMK_ACTIVITY_SLEEP)) {
+    if (game_active && (ev->state == ZMK_ACTIVITY_IDLE || ev->state == ZMK_ACTIVITY_SLEEP)) {
         LOG_INF("game force-deactivate on activity=%d", (int)ev->state);
         deactivate();
     }

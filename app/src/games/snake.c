@@ -38,6 +38,7 @@
 LOG_MODULE_DECLARE(aurorakey_games, CONFIG_ZMK_LOG_LEVEL);
 
 #include "game_board.h"
+#include "game_render.h"
 #include "game_runtime.h"
 
 #if IS_ENABLED(CONFIG_AURORAKEY_GAMES) && IS_ENABLED(CONFIG_AURORAKEY_GAME_SNAKE)
@@ -143,9 +144,6 @@ static struct snake S;
  * the middle wrist gap aren't used — the splayed layout means
  * "GO" doesn't read as continuous text either way; LH = G, RH = O
  * is the cleanest mapping. */
-#define GLYPH_W 3
-#define GLYPH_H 5
-
 static const uint8_t glyph_G[GLYPH_H] = {
     0b111, /* ###  */
     0b100, /* #..  */
@@ -161,17 +159,17 @@ static const uint8_t glyph_O[GLYPH_H] = {
     0b010, /* .#.  */
 };
 
-static void draw_glyph(const uint8_t glyph[GLYPH_H], int origin_x, int origin_y, uint32_t color) {
-    for (int gy = 0; gy < GLYPH_H; gy++) {
-        for (int gx = 0; gx < GLYPH_W; gx++) {
-            /* Bit 2 is the leftmost column for readability of the
-             * literals above (left bit = leftmost pixel). */
-            if (glyph[gy] & (1u << (GLYPH_W - 1 - gx))) {
-                game_paint(origin_x + gx, origin_y + gy, color);
-            }
-        }
-    }
-}
+/* "S" — the cycle name-splash glyph (runtime draws games[active]->glyph). */
+static const uint8_t glyph_S[GLYPH_H] = {
+    0b111, /* ###  */
+    0b100, /* #..  */
+    0b111, /* ###  */
+    0b001, /* ..#  */
+    0b111, /* ###  */
+};
+
+/* Glyph blitting now lives in game_render.c (game_draw_glyph) — shared
+ * with the other games and the runtime's cycle splash. */
 
 /* ─── Helpers ──────────────────────────────────────────────────────── */
 
@@ -482,16 +480,16 @@ static void render_intro(void) {
         /* Full-screen: G on LH cols 1..3, O on RH cols 9..11. Both
          * letters appear together at t=0 — both halves are visible so
          * the user reads "GO" simultaneously. */
-        draw_glyph(glyph_G, 1, 0, color);
-        draw_glyph(glyph_O, 9, 0, color);
+        game_draw_glyph(glyph_G, 1, 0, color);
+        game_draw_glyph(glyph_O, 9, 0, color);
     } else {
         /* LH-only: G + O don't fit side-by-side at 3 cols each on a
          * 6-col strip, but sequencing them reads better as a "GO"
          * cue. G appears at t=0; O joins at the halfway mark on cols
          * 3..5. By the end of the intro both letters are lit. */
-        draw_glyph(glyph_G, 0, 0, color);
+        game_draw_glyph(glyph_G, 0, 0, color);
         if (age >= INTRO_MS / 2) {
-            draw_glyph(glyph_O, 3, 0, color);
+            game_draw_glyph(glyph_O, 3, 0, color);
         }
     }
 }
@@ -579,7 +577,22 @@ static void render_diff(void) {
     S.prev_food_valid = true;
 }
 
+/* Paint the thumb-cluster control legend in the shared palette so the
+ * game's keys are lit like the rest of the board. Dirty-cached → ~free
+ * after the first frame. LH bottom row (69/70/71) is unused by Snake. */
+static void snake_paint_legend(void) {
+    game_paint_pos(KEY_RH_LEFT, GAME_CTL_DIR);
+    game_paint_pos(KEY_RH_UP, GAME_CTL_DIR);
+    game_paint_pos(KEY_RH_RIGHT, GAME_CTL_DIR);
+    game_paint_pos(KEY_RH_DOWN, GAME_CTL_DIR);
+    game_paint_pos(KEY_LH_START, GAME_CTL_SELECT);
+    game_paint_pos(KEY_LH_RESET, GAME_CTL_ALT);
+    game_paint_pos(GKEY_EXIT, GAME_CTL_EXIT);
+    game_paint_pos(GKEY_CYCLE, GAME_CTL_CYCLE);
+}
+
 static void render(void) {
+    snake_paint_legend();
     if (S.phase == PHASE_WARMUP) {
         render_warmup();
         return;
@@ -609,16 +622,14 @@ static void render(void) {
 
 /* ─── Game module hooks ────────────────────────────────────────────── */
 
-void snake_init(void) { /* no-op; state is reset on enter */ }
-
-void snake_enter(void) {
+static void snake_enter(void) {
     snake_reset();
     render();
 }
 
-void snake_exit(void) { /* Nothing to do; runtime clears the layer's overlay. */ }
+static void snake_exit(void) { /* Nothing to do; runtime clears the layer's overlay. */ }
 
-void snake_tick(void) {
+static void snake_tick(void) {
     int64_t now = k_uptime_get();
     switch (S.phase) {
     case PHASE_WARMUP:
@@ -659,7 +670,7 @@ void snake_tick(void) {
     render();
 }
 
-void snake_input(uint32_t position) {
+static void snake_input(uint32_t position) {
     switch (position) {
     case KEY_RH_UP:
         if (S.phase == PHASE_PLAYING) {
@@ -710,7 +721,7 @@ void snake_input(uint32_t position) {
     render();
 }
 
-int snake_tick_ms(void) {
+static int snake_tick_ms(void) {
     /* WARMUP / INTRO / PAUSED / DEAD / WON tick at 50 ms so the canvas
      * fill + splash + flash animations stay smooth. Gameplay tick
      * honours S.tick_ms. */
@@ -723,5 +734,18 @@ int snake_tick_ms(void) {
     }
     return S.tick_ms;
 }
+
+/* ─── Module registration ──────────────────────────────────────────── */
+
+const struct game_module snake_module = {
+    .name = "Snake",
+    .glyph = glyph_S,
+    .glyph_color = GAME_COLOR(0x00FF00),
+    .enter = snake_enter,
+    .exit = snake_exit,
+    .tick = snake_tick,
+    .input = snake_input,
+    .tick_ms = snake_tick_ms,
+};
 
 #endif /* CONFIG_AURORAKEY_GAMES && CONFIG_AURORAKEY_GAME_SNAKE */

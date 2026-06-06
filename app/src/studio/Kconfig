@@ -264,8 +264,9 @@ config AURORAKEY_GAME_EXIT_POSITION
       When a game is active and the user presses this matrix position,
       the runtime exits the game and switches the keymap back to layer
       0. Default 53 = Glove80 LH outer thumb (between start and reset
-      on the standard thumb cluster). Other thumb positions used by
-      games: 52 (start/pause), 54 (reset), 56/57/72/73 (RH arrows).
+      on the standard thumb cluster). Other reserved thumb positions:
+      72 (cycle to next game), 52 (start/pause), 54 (reset),
+      55/56/57/73 (RH arrows), 69/70/71 (LH arrows, 2-player Connect 4).
 
 config AURORAKEY_GAME_TICK_MS
     int "AuroraKey: default game tick interval (ms)"
@@ -309,11 +310,64 @@ config AURORAKEY_GAME_SNAKE_ACCEL_PCT
 endif # AURORAKEY_GAME_SNAKE
 
 config AURORAKEY_GAME_CONWAY
-    bool "AuroraKey: Conway's Game of Life (stub for v2)"
+    bool "AuroraKey: Conway's Game of Life"
     default n
 
-config AURORAKEY_GAME_CONNECT4
-    bool "AuroraKey: Connect 4 (stub for v2)"
+if AURORAKEY_GAME_CONWAY
+
+config AURORAKEY_GAME_CONWAY_TICK_MS
+    int "AuroraKey: Conway generation interval (ms)"
+    default 350
+    range 60 2000
+
+config AURORAKEY_GAME_CONWAY_INIT_DENSITY
+    int "AuroraKey: Conway random-soup live cell percent"
+    default 30
+    range 0 100
+
+config AURORAKEY_GAME_CONWAY_WRAP
+    bool "AuroraKey: Conway wraps edges (torus topology)"
     default n
+
+endif # AURORAKEY_GAME_CONWAY
+
+config AURORAKEY_GAME_CONNECT4
+    bool "AuroraKey: Connect 4"
+    default n
+
+if AURORAKEY_GAME_CONNECT4
+
+config AURORAKEY_GAME_CONNECT4_COLS
+    int "AuroraKey: Connect 4 board columns"
+    default 6
+    range 4 6
+    help
+      The board spans the wrist gap: 3 columns on each half (LH x2-4 +
+      RH x9-11). 6 is the full width; fewer use the centre-most slots.
+
+config AURORAKEY_GAME_CONNECT4_ROWS
+    int "AuroraKey: Connect 4 board rows"
+    default 5
+    range 4 5
+    help
+      5 board rows fit above the top cursor row on the full-height grid
+      columns.
+
+config AURORAKEY_GAME_CONNECT4_WIN_LEN
+    int "AuroraKey: Connect 4 win run length"
+    default 4
+    range 3 5
+
+config AURORAKEY_GAME_CONNECT4_AI_LEVEL
+    int "AuroraKey: Connect 4 AI difficulty (1 = random .. 9 = deep minimax)"
+    default 5
+    range 1 9
+
+config AURORAKEY_GAME_CONNECT4_TICK_MS
+    int "AuroraKey: Connect 4 tick interval (ms)"
+    default 200
+    range 60 2000
+
+endif # AURORAKEY_GAME_CONNECT4
 
 endif # AURORAKEY_GAMES
