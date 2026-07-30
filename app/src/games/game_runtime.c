@@ -87,9 +87,24 @@ static void paint_one(int pos, uint32_t color) {
     if (last_pushed[pos] == color) {
         return;
     }
+    /* Local call takes the layer ID: on the central, layer_id_to_index()
+     * resolves it through keymap_layer_orders. */
     zmk_rgb_underglow_layer_stage_set(game_layer_id, (uint32_t)pos, color);
 #if GAME_FANOUT_TO_PERIPHERAL
-    int err = zmk_split_central_update_rgb_color(game_layer_id, (uint32_t)pos, color);
+    /* The split call takes the layer INDEX, not the ID. The peripheral
+     * has no Studio, so CONFIG_ZMK_KEYMAP_LAYER_REORDERING is off there
+     * and its layer_id_to_index() is `return layer_id` — it treats the
+     * incoming value as a raw index (see rgb_underglow_studio.c, which
+     * documents that the central forwards an already-resolved index).
+     *
+     * The central DOES have Studio, which selects LAYER_REORDERING, so
+     * LAYER_INDEX_TO_ID is keymap_layer_orders[] and an id need not
+     * equal its index. Sending game_layer_id here made the peripheral
+     * stage every pixel into pending_colors[id] while it rendered
+     * pending_colors[index] — so RH received the whole game and
+     * displayed none of it, sitting on its stored layer colour instead.
+     * That is the "peripheral just stays the current colour" bug. */
+    int err = zmk_split_central_update_rgb_color((uint32_t)GAME_LAYER, (uint32_t)pos, color);
     if (err < 0) {
         /* msgq full (-EAGAIN) or transient BLE error. Leave the cache
          * stale so the next paint pass retries this cell; LH already
@@ -312,7 +327,10 @@ static void deactivate(void) {
      * configured colours. One clear-layer fanout so RH stops too. */
     zmk_rgb_underglow_layer_clear(game_layer_id);
 #if GAME_FANOUT_TO_PERIPHERAL
-    zmk_split_central_rgb_clear_layer(game_layer_id);
+    /* Index, not id — same split contract as paint_one above. With the
+     * id, the peripheral cleared some other layer's buffer and left the
+     * game's pixels standing on RH after exit. */
+    zmk_split_central_rgb_clear_layer((uint32_t)GAME_LAYER);
 #endif
     cache_reset_unknown();
 }
