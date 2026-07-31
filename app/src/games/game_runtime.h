@@ -47,10 +47,11 @@ void game_paint_clear(void);
  * control keys. Out-of-range positions are silent no-ops. */
 void game_paint_pos(uint32_t pos, uint32_t color);
 
-/* Clear EVERY key, including the thumb cluster. Dirty-cached, so the
- * fanout cost is proportional to how many keys were actually lit. Use
- * this on game-switch; for fresh activation the runtime clears the
- * thumb cluster and lets the game warm up the grid itself. */
+/* Clear EVERY key, including the thumb cluster, as individual per-pixel
+ * writes (dirty-cached, so cost tracks how many keys were actually
+ * lit). The runtime itself no longer calls this — activation and
+ * game-cycle blank the canvas with a single fill command instead — but
+ * it remains for games that want a mid-session full clear. */
 void game_clear_all(void);
 
 /* ─── Thumb-cluster control keys (Glove80 matrix positions) ────────── */

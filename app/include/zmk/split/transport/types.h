@@ -87,6 +87,14 @@ enum zmk_split_transport_central_command_type {
      * transport serialises this enum by value, so inserting mid-list would
      * renumber every command after it. */
     ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_CLEAR_PENDING,
+    /* AuroraKey: stage every key of a layer to one colour in a single
+     * command. A full-canvas establishment done per pixel is ~80 split
+     * writes — the peripheral trails the central by the whole sweep (and
+     * under load, part of the sweep can be refused outright), which is
+     * why the right half blanked visibly later than the left on every
+     * game entry and game-to-game cycle. One fill is one queue slot and
+     * one radio packet: both halves flip together. */
+    ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_FILL,
 } __packed;
 
 struct zmk_split_transport_central_command {
@@ -122,6 +130,11 @@ struct zmk_split_transport_central_command {
         struct {
             uint32_t layer_id;
         } set_rgb_clear;
+
+        struct {
+            uint32_t layer_id;
+            uint32_t color;
+        } set_rgb_fill;
 
         /* Full underglow state snapshot. Sized to the smallest serialisable
          * form of struct rgb_underglow_state — animation_step is excluded

@@ -203,11 +203,20 @@ struct split_underglow_state_payload {
  * Depth covers a full-canvas repaint with headroom; the central paces well
  * under that, so a full queue means something upstream is misbehaving and
  * deserves a warning rather than another silent drop. */
+/* Fill-layer payload: stage every key of layer_id to color in one command.
+ * The whole point is that the 80-key loop runs HERE, so a full-canvas
+ * establishment costs one radio packet instead of 80. */
+struct split_rgb_fill_payload {
+    uint32_t layer_id;
+    uint32_t color;
+} __packed;
+
 struct split_rgb_cmd {
     uint8_t opcode;
     union {
         struct split_rgb_color_payload color;
         struct split_underglow_state_payload underglow;
+        struct split_rgb_fill_payload fill;
         uint32_t clear_layer_id;
     } data;
 };
@@ -253,6 +262,11 @@ static void split_svc_update_rgb_color_callback(struct k_work *work) {
             LOG_DBG("RGB clear pending layer %u from central", cmd.data.clear_layer_id);
             zmk_rgb_underglow_layer_clear_pending(cmd.data.clear_layer_id);
             break;
+        case 0x07: // fill_layer: every key of the layer to one colour
+            LOG_DBG("RGB fill layer %u color 0x%08x from central", cmd.data.fill.layer_id,
+                    cmd.data.fill.color);
+            zmk_rgb_underglow_layer_fill(cmd.data.fill.layer_id, cmd.data.fill.color);
+            break;
         }
     }
 }
@@ -283,6 +297,11 @@ static ssize_t split_svc_update_rgb_color(struct bt_conn *conn, const struct bt_
         if (len < 1 + sizeof(cmd.data.underglow))
             return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
         memcpy(&cmd.data.underglow, &data[1], sizeof(cmd.data.underglow));
+        break;
+    case 0x07: // fill_layer: 1 opcode + 8 payload
+        if (len < 1 + sizeof(cmd.data.fill))
+            return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+        memcpy(&cmd.data.fill, &data[1], sizeof(cmd.data.fill));
         break;
     case 0x02: // save — no payload
     case 0x03: // discard — no payload

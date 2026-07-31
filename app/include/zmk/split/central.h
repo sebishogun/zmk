@@ -53,6 +53,11 @@ int zmk_split_central_rgb_clear_layer(uint32_t layer_id);
  * painter staged into; zmk_split_central_rgb_clear_layer() additionally
  * drops whatever the user committed. */
 int zmk_split_central_rgb_clear_layer_pending(uint32_t layer_id);
+/* Stage every key of a layer to one colour on the peripheral(s) — the
+ * split counterpart of zmk_rgb_underglow_layer_fill(). One command, one
+ * radio packet; the peripheral runs the 80-key loop locally. Same layer
+ * INDEX contract as zmk_split_central_update_rgb_color(). */
+int zmk_split_central_rgb_fill_layer(uint32_t layer_id, uint32_t color);
 
 /* Colour writes are the one split command whose sender is expected to track
  * delivery itself and repaint what did not land. A transport that has to

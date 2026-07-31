@@ -89,10 +89,10 @@ static void cache_reset_unknown(void) {
 
 /* Returns true when the cell is known-good on BOTH halves — either it
  * already held this colour, or the write was accepted. False means the
- * split write was refused and the cell is still stale; the caller must
- * come back to it. Gameplay can ignore the result (the next frame
- * repaints anyway); the canvas wipe cannot, because there is no next
- * frame to rescue a position it has already walked past. */
+ * split write was refused and the cell is still stale; the dirty cache
+ * stays stale too, so the next paint of that cell re-sends. Gameplay
+ * ignores the result (frames repaint); canvas establishment no longer
+ * goes through here at all — see wipe_canvas_then(). */
 static bool paint_one(int pos, uint32_t color) {
     if (pos < 0 || pos >= ZMK_KEYMAP_LEN) {
         return true; /* nothing to do — not a real position */
@@ -168,11 +168,9 @@ void game_clear_all(void) {
 
 /* The 12 thumb-cluster keys are NOT on the logical grid, so
  * game_paint_clear() (grid-only) never touches them and they used to
- * keep their DT-baked layer colour under the game. That was handled by
- * clearing just those 12 on activation, to avoid the cost of an 80-cell
- * burst. The paced MODE_WIPE below now covers all 80 positions without
- * the burst, so the special case is gone — thumbs are simply part of
- * the canvas. */
+ * keep their DT-baked layer colour under the game. No special case any
+ * more: wipe_canvas_then()'s layer fill covers all 80 positions, thumbs
+ * included, before anything draws. */
 
 /* ─── Game registry (compiled-in modules) ──────────────────────────── */
 
@@ -193,51 +191,23 @@ static const struct game_module *const games[] = {
  * last-played game. */
 static int active = 0;
 
-/* MODE_WIPE blanks the whole 80-key canvas BEFORE the game draws.
+/* Every transition — entry, game-to-game cycle, splash-to-game — starts
+ * from an all-OFF canvas on BOTH halves via wipe_canvas_then() below.
  *
- * A full-canvas clear is ~80 split writes. The central's split-bt msgq
- * holds a small fraction of that, so firing them in one burst overruns
- * it and the surplus is dropped. paint_one leaves the dirty cache stale
- * on failure so the next frame retries — which rescues a game that
- * repaints continuously, and does nothing for one that doesn't. Connect
- * 4 only redraws on input, so a cell dropped during entry keeps its old
- * colour until you happen to press something; Conway redraws each tick
- * but visibly churns first.
+ * This used to be a paced per-pixel wipe: ~80 split writes at 8 per
+ * 20 ms pass, holding position on refusals. Correct, but structurally
+ * laggy — the central blanks its half locally in microseconds while the
+ * peripheral's copy trails by the whole sweep (200 ms on a quiet link,
+ * visibly longer under Conway churn, and a saturated link could exhaust
+ * the pass budget and leave cells stale). That asymmetry was the
+ * "right half doesn't clean up in time" report.
  *
- * Snake carried its own paced WARMUP for exactly this reason. Doing it
- * per-game meant the two games added later simply didn't have it, and
- * inherited whatever was on the peripheral. Hoisted into the runtime so
- * every game — now and later — gets a guaranteed-clean canvas, paced at
- * WIPE_PER_TICK positions per pass so the queue drains between them.
- */
-enum run_mode { MODE_WIPE, MODE_PLAYING, MODE_SPLASH };
+ * The SET_RGB_FILL split command removes the asymmetry: one 9-byte
+ * write tells the peripheral to run the 80-key loop itself, so both
+ * halves flip to black in one connection interval and the queue holds
+ * one entry instead of eighty. */
+enum run_mode { MODE_PLAYING, MODE_SPLASH };
 static enum run_mode mode = MODE_PLAYING;
-/* Where the wipe hands over when it finishes: PLAYING (enter the game) or
- * SPLASH (show the incoming game's name glyph first). Every transition
- * between two things being drawn now goes through the paced wipe, so no
- * path is left doing an unpaced burst. */
-static enum run_mode wipe_next = MODE_PLAYING;
-
-/* 8 per 20 ms pass clears all 80 keys in ~200 ms, comfortably inside the
- * link's throughput while staying short enough to read as instant. */
-#define WIPE_PER_TICK 8
-#define WIPE_TICK_MS 20
-/* 80 positions at 8 per pass needs 10 passes; allow generously more so a
- * busy link can stall repeatedly and still finish, while a dead link
- * still gives up inside a second rather than hanging on a black board. */
-#define WIPE_MAX_PASSES 50
-static int wipe_pos;
-static int wipe_passes;
-
-/* Begin a paced full-canvas wipe. The tick handler runs it to completion
- * and then hands over to `next` — MODE_PLAYING to enter the incoming
- * game, MODE_SPLASH to flash its name glyph on the blank canvas first. */
-static void begin_wipe(enum run_mode next) {
-    wipe_pos = 0;
-    wipe_passes = 0;
-    wipe_next = next;
-    mode = MODE_WIPE;
-}
 static int64_t splash_started = 0;
 
 static const struct game_module *cur(void) { return games[active]; }
@@ -291,6 +261,49 @@ static void draw_splash(void) {
 static void tick_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(tick_work, tick_handler);
 
+/* Blank the whole canvas on both halves, then hand over to `next` —
+ * MODE_PLAYING enters the (already-selected) game, MODE_SPLASH flashes
+ * its name glyph on the fresh black first. See the run_mode comment for
+ * why this is a fill command rather than 80 writes. */
+static void wipe_canvas_then(enum run_mode next) {
+    /* Central: stage every key OFF locally in one loop. */
+    zmk_rgb_underglow_layer_fill(game_layer_id, GAME_COLOR_OFF);
+#if GAME_FANOUT_TO_PERIPHERAL
+    int err = zmk_split_central_rgb_fill_layer((uint32_t)GAME_LAYER, GAME_COLOR_OFF);
+    if (err == 0) {
+        /* Both halves now hold OFF everywhere — the cache can say so,
+         * which lets the game's first frame skip re-sending black. */
+        for (int i = 0; i < ZMK_KEYMAP_LEN; i++) {
+            last_pushed[i] = GAME_COLOR_OFF;
+        }
+    } else {
+        /* Peripheral unreachable. Leave the cache unknown so every
+         * subsequent paint transmits — the game's own draws become the
+         * repair as the link comes back. */
+        LOG_WRN("split fill refused (%d) — repainting per-pixel", err);
+        cache_reset_unknown();
+    }
+#else
+    for (int i = 0; i < ZMK_KEYMAP_LEN; i++) {
+        last_pushed[i] = GAME_COLOR_OFF;
+    }
+#endif
+    if (next == MODE_SPLASH) {
+        mode = MODE_SPLASH;
+        splash_started = k_uptime_get();
+        draw_splash();
+        k_work_reschedule(&tick_work, K_MSEC(50));
+        return;
+    }
+    mode = MODE_PLAYING;
+    dispatch_enter();
+    int first = dispatch_tick_ms();
+    if (first < 20) {
+        first = 20;
+    }
+    k_work_reschedule(&tick_work, K_MSEC(first));
+}
+
 static void tick_handler(struct k_work *work) {
     ARG_UNUSED(work);
     if (!game_active) {
@@ -309,67 +322,14 @@ static void tick_handler(struct k_work *work) {
         seen_dropped_writes = dropped;
         LOG_DBG("split dropped a colour write — invalidating paint cache");
         cache_reset_unknown();
-        if (mode == MODE_WIPE) {
-            /* Positions the wipe already walked past are stale again. */
-            wipe_pos = 0;
-        }
     }
 #endif
-    if (mode == MODE_WIPE) {
-        int end = wipe_pos + WIPE_PER_TICK;
-        if (end > ZMK_KEYMAP_LEN) {
-            end = ZMK_KEYMAP_LEN;
-        }
-        /* Do NOT advance past a position whose split write was refused.
-         * The queue is full right now; walking on would leave that LED
-         * showing its old colour with nothing left to repaint it — the
-         * wipe is the last pass before the game draws. Stop the pass
-         * here and resume from the same position once the queue has
-         * drained. This is why a stray key or two stayed lit until
-         * gameplay happened to paint over it. */
-        while (wipe_pos < end) {
-            if (!paint_one(wipe_pos, GAME_COLOR_OFF)) {
-                break;
-            }
-            wipe_pos++;
-        }
-        if (wipe_pos < ZMK_KEYMAP_LEN) {
-            if (++wipe_passes > WIPE_MAX_PASSES) {
-                /* Refusing forever means the link is down, not busy.
-                 * Hand over rather than sitting on a black board — the
-                 * game's own repaints become the fallback. */
-                LOG_WRN("canvas wipe gave up at pos %d after %d passes", wipe_pos, wipe_passes);
-                wipe_pos = ZMK_KEYMAP_LEN;
-            } else {
-                k_work_reschedule(&tick_work, K_MSEC(WIPE_TICK_MS));
-                return;
-            }
-        }
-        /* Canvas is blank on both halves — hand over. */
-        if (wipe_next == MODE_SPLASH) {
-            mode = MODE_SPLASH;
-            splash_started = k_uptime_get();
-            draw_splash();
-            k_work_reschedule(&tick_work, K_MSEC(50));
-            return;
-        }
-        mode = MODE_PLAYING;
-        dispatch_enter();
-        int first = dispatch_tick_ms();
-        if (first < 20) {
-            first = 20;
-        }
-        k_work_reschedule(&tick_work, K_MSEC(first));
-        return;
-    }
     if (mode == MODE_SPLASH) {
         if (k_uptime_get() - splash_started >= SPLASH_MS) {
-            /* Paced wipe rather than an 80-write burst — the splash has
-             * just painted a glyph that must be gone before the next
-             * game draws, and this is the same transition that left
-             * colours stranded between games. */
-            begin_wipe(MODE_PLAYING);
-            k_work_reschedule(&tick_work, K_NO_WAIT);
+            /* Splash over — blank the glyph and enter the game. The
+             * fill costs one queue entry, so this transition can no
+             * longer strand colours between games. */
+            wipe_canvas_then(MODE_PLAYING);
         } else {
             k_work_reschedule(&tick_work, K_MSEC(50));
         }
@@ -452,16 +412,19 @@ static void cycle_to_next(void) {
     if (N_GAMES <= 1) {
         return; /* nothing to cycle to */
     }
-    dispatch_exit();
+    /* Only the active game is "entered" in PLAYING mode. A cycle press
+     * during the splash window (or any future non-PLAYING state) must
+     * not call exit() on a module whose enter() never ran — today every
+     * game's exit is a no-op, but that is luck, not a contract. Same
+     * guard deactivate() applies. */
+    if (mode == MODE_PLAYING) {
+        dispatch_exit();
+    }
     active = (active + 1) % N_GAMES;
     LOG_INF("game cycle -> %s", cur()->name);
-    /* Wipe first, splash on the blank canvas afterwards. This used to
-     * call game_clear_all() — one unpaced 80-write burst — and draw the
-     * glyph immediately. Under the split queue's real backpressure most
-     * of that burst is now refused outright, which would have left the
-     * new game's glyph drawn on top of the outgoing game. */
-    begin_wipe(MODE_SPLASH);
-    k_work_reschedule(&tick_work, K_NO_WAIT);
+    /* Blank canvas first, splash on it after — one fill, so the new
+     * game's glyph can never land on top of the outgoing game. */
+    wipe_canvas_then(MODE_SPLASH);
 }
 
 /* ─── Activation / deactivation ───────────────────────────────────────── */
@@ -492,12 +455,12 @@ static void activate(void) {
      * the layer's colour before the game paints its control legend. */
     cache_reset_unknown();
     LOG_INF("game enter: %s (layer index=%d, id=%u)", cur()->name, (int)GAME_LAYER, game_layer_id);
-    /* Wipe the full canvas — paced — before the game draws anything.
-     * Replaces the old clear_thumb() + "the game warms the grid up"
-     * arrangement, which only held for Snake and left Conway and
-     * Connect 4 drawing on top of whatever the peripheral still had. */
-    begin_wipe(MODE_PLAYING);
-    k_work_reschedule(&tick_work, K_NO_WAIT);
+    /* Blank the full canvas on both halves before the game draws
+     * anything. Replaces the old clear_thumb() + "the game warms the
+     * grid up" arrangement, which only held for Snake and left Conway
+     * and Connect 4 drawing on top of whatever the peripheral still
+     * had. */
+    wipe_canvas_then(MODE_PLAYING);
 }
 
 static void deactivate(void) {
@@ -569,11 +532,10 @@ static int on_position_state(const zmk_event_t *eh) {
         return ZMK_EV_EVENT_HANDLED;
     }
     /* Only forward gameplay input once the module has actually been
-     * entered. During MODE_WIPE enter() has not run yet — on activation
-     * because the canvas is still being blanked, and after a cycle
-     * because `active` already points at the incoming game. Dispatching
-     * into a module that never saw enter() reaches uninitialised game
-     * state. MODE_SPLASH is the same window, one step later. */
+     * entered. During MODE_SPLASH the previous game has exited and the
+     * incoming one — which `active` already points at — has not seen
+     * enter() yet; dispatching into it would reach uninitialised game
+     * state. */
     if (mode != MODE_PLAYING) {
         return ZMK_EV_EVENT_HANDLED;
     }

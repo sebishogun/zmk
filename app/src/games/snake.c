@@ -624,6 +624,15 @@ static void render(void) {
 
 static void snake_enter(void) {
     snake_reset();
+    /* The runtime has just filled the whole canvas OFF on both halves,
+     * so WARMUP — a second, per-pixel pass painting OFF over OFF — is a
+     * pure 1 s wait here with every key dead. Skip straight to the GO
+     * splash. WARMUP stays in snake_reset() for death/win auto-resets,
+     * where the board is mid-flash red/green and the paced OFF pass is
+     * what erases it. */
+    S.phase = PHASE_INTRO;
+    S.phase_started_ms = k_uptime_get();
+    S.warmup_pos = game_board.width * game_board.height;
     render();
 }
 

@@ -1236,6 +1236,23 @@ void split_central_split_run_callback(struct k_work *work) {
                 sizeof(clear_buf), true);
             break;
         }
+        case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_FILL: {
+            if (peripherals[payload_wrapper.source].update_rgb_color_handle == 0)
+                break;
+            uint8_t fill_buf[9];
+            fill_buf[0] = 0x07; // opcode: fill_layer (layer_id u32 + color u32)
+            memcpy(&fill_buf[1], &payload_wrapper.cmd.data.set_rgb_fill.layer_id, 4);
+            memcpy(&fill_buf[5], &payload_wrapper.cmd.data.set_rgb_fill.color, 4);
+            int fill_err = bt_gatt_write_without_response(
+                peripherals[payload_wrapper.source].conn,
+                peripherals[payload_wrapper.source].update_rgb_color_handle, fill_buf,
+                sizeof(fill_buf), true);
+            if (fill_err) {
+                LOG_ERR("Failed to send RGB fill to peripheral %d (err %d)",
+                        payload_wrapper.source, fill_err);
+            }
+            break;
+        }
         case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_UNDERGLOW_STATE: {
             /* Piggyback opcode 0x05 on update_rgb_color. Carrying this
              * over a dedicated GATT char would require central's bonded
@@ -1414,6 +1431,7 @@ static int split_central_bt_send_command(uint8_t source,
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_DISCARD:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_CLEAR:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_CLEAR_PENDING:
+    case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_FILL:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_UNDERGLOW_STATE:
         return split_bt_queue_command(wrapper, false);
     /* The only command whose sender tracks delivery and repaints on refusal.

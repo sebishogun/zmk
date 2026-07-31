@@ -24,6 +24,12 @@ void zmk_rgb_underglow_layer_clear(uint32_t layer_id);
  * overlay too would silently discard the user's saved per-key colours for that
  * layer until the next reboot reloaded them from NVS. */
 void zmk_rgb_underglow_layer_clear_pending(uint32_t layer_id);
+/* Stage EVERY key of a layer to one colour in a single call — the bulk
+ * form of stage_set. Exists so a transient painter can establish a
+ * uniform canvas without 80 individual writes; over the split link the
+ * matching SET_RGB_FILL command makes the peripheral do this loop
+ * locally, so the whole canvas costs one radio packet instead of 80. */
+void zmk_rgb_underglow_layer_fill(uint32_t layer_id, uint32_t color);
 int zmk_rgb_underglow_layer_save(void);
 void zmk_rgb_underglow_layer_discard(void);
 void zmk_rgb_underglow_layer_reset_all(void);
