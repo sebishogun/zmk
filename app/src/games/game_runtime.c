@@ -80,12 +80,18 @@ static void cache_reset_unknown(void) {
 
 /* ─── Public paint API ─────────────────────────────────────────────── */
 
-static void paint_one(int pos, uint32_t color) {
+/* Returns true when the cell is known-good on BOTH halves — either it
+ * already held this colour, or the write was accepted. False means the
+ * split write was refused and the cell is still stale; the caller must
+ * come back to it. Gameplay can ignore the result (the next frame
+ * repaints anyway); the canvas wipe cannot, because there is no next
+ * frame to rescue a position it has already walked past. */
+static bool paint_one(int pos, uint32_t color) {
     if (pos < 0 || pos >= ZMK_KEYMAP_LEN) {
-        return;
+        return true; /* nothing to do — not a real position */
     }
     if (last_pushed[pos] == color) {
-        return;
+        return true;
     }
     /* Local call takes the layer ID: on the central, layer_id_to_index()
      * resolves it through keymap_layer_orders. */
@@ -107,12 +113,13 @@ static void paint_one(int pos, uint32_t color) {
     int err = zmk_split_central_update_rgb_color((uint32_t)GAME_LAYER, (uint32_t)pos, color);
     if (err < 0) {
         /* msgq full (-EAGAIN) or transient BLE error. Leave the cache
-         * stale so the next paint pass retries this cell; LH already
-         * rendered correctly, RH catches up within 1–2 ticks. */
-        return;
+         * stale so this cell gets retried; LH already rendered
+         * correctly, RH is still showing the old colour. */
+        return false;
     }
 #endif
     last_pushed[pos] = color;
+    return true;
 }
 
 void game_paint(int x, int y, uint32_t color) {
@@ -203,12 +210,18 @@ static enum run_mode mode = MODE_PLAYING;
  * link's throughput while staying short enough to read as instant. */
 #define WIPE_PER_TICK 8
 #define WIPE_TICK_MS 20
+/* 80 positions at 8 per pass needs 10 passes; allow generously more so a
+ * busy link can stall repeatedly and still finish, while a dead link
+ * still gives up inside a second rather than hanging on a black board. */
+#define WIPE_MAX_PASSES 50
 static int wipe_pos;
+static int wipe_passes;
 
 /* Begin a paced full-canvas wipe; the tick handler runs it to completion
  * and then calls dispatch_enter() for the incoming game. */
 static void begin_wipe(void) {
     wipe_pos = 0;
+    wipe_passes = 0;
     mode = MODE_WIPE;
 }
 static int64_t splash_started = 0;
@@ -274,12 +287,30 @@ static void tick_handler(struct k_work *work) {
         if (end > ZMK_KEYMAP_LEN) {
             end = ZMK_KEYMAP_LEN;
         }
-        for (; wipe_pos < end; wipe_pos++) {
-            paint_one(wipe_pos, GAME_COLOR_OFF);
+        /* Do NOT advance past a position whose split write was refused.
+         * The queue is full right now; walking on would leave that LED
+         * showing its old colour with nothing left to repaint it — the
+         * wipe is the last pass before the game draws. Stop the pass
+         * here and resume from the same position once the queue has
+         * drained. This is why a stray key or two stayed lit until
+         * gameplay happened to paint over it. */
+        while (wipe_pos < end) {
+            if (!paint_one(wipe_pos, GAME_COLOR_OFF)) {
+                break;
+            }
+            wipe_pos++;
         }
         if (wipe_pos < ZMK_KEYMAP_LEN) {
-            k_work_reschedule(&tick_work, K_MSEC(WIPE_TICK_MS));
-            return;
+            if (++wipe_passes > WIPE_MAX_PASSES) {
+                /* Refusing forever means the link is down, not busy.
+                 * Hand over rather than sitting on a black board — the
+                 * game's own repaints become the fallback. */
+                LOG_WRN("canvas wipe gave up at pos %d after %d passes", wipe_pos, wipe_passes);
+                wipe_pos = ZMK_KEYMAP_LEN;
+            } else {
+                k_work_reschedule(&tick_work, K_MSEC(WIPE_TICK_MS));
+                return;
+            }
         }
         /* Canvas is blank on both halves — hand over to the game. */
         mode = MODE_PLAYING;
