@@ -60,7 +60,14 @@ config ZMK_SPLIT_BLE_CENTRAL_SPLIT_RUN_STACK_SIZE
 
 config ZMK_SPLIT_BLE_CENTRAL_SPLIT_RUN_QUEUE_SIZE
     int "Max number of behavior run events to queue to send to the peripheral(s)"
+    default 32 if EXPERIMENTAL_RGB_LAYER
     default 5
+    help
+      Behaviour invocations evict the oldest entry when this fills, so a small
+      queue is fine for them. Per-key RGB updates share it and instead get
+      backpressure (-EAGAIN) so the caller can retry, which means a queue much
+      smaller than a full-canvas repaint turns into constant stall-and-retry.
+      Hence the larger default once the per-key RGB layer is enabled.
 
 config ZMK_SPLIT_BLE_PREF_INT
     int "Connection interval to use for split central/peripheral connection"

@@ -1218,11 +1218,16 @@ void split_central_split_run_callback(struct k_work *work) {
                 peripherals[payload_wrapper.source].update_rgb_color_handle, &op, 1, true);
             break;
         }
-        case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_CLEAR: {
+        case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_CLEAR:
+        case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_CLEAR_PENDING: {
             if (peripherals[payload_wrapper.source].update_rgb_color_handle == 0)
                 break;
             uint8_t clear_buf[5];
-            clear_buf[0] = 0x04; // opcode: clear_layer
+            /* 0x04 drops committed + staged, 0x06 drops staged only. */
+            clear_buf[0] =
+                (payload_wrapper.cmd.type == ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_CLEAR)
+                    ? 0x04
+                    : 0x06;
             memcpy(&clear_buf[1], &payload_wrapper.cmd.data.set_rgb_clear.layer_id, 4);
             bt_gatt_write_without_response(
                 peripherals[payload_wrapper.source].conn,
@@ -1277,22 +1282,48 @@ void split_central_split_run_callback(struct k_work *work) {
 
 K_WORK_DEFINE(split_central_split_run_work, split_central_split_run_callback);
 
-static int split_bt_invoke_behavior_payload(struct central_cmd_wrapper payload_wrapper) {
+/* Behaviour invocations and layout/indicator updates keep the upstream policy:
+ * block briefly, and if the queue is still full drop the OLDEST entry to make
+ * room. A relayed keypress is time-sensitive, so the newest one is worth more
+ * than a stale one, and the caller has nothing useful to do with a failure.
+ *
+ * RGB commands must not use that policy, for two reasons.
+ *
+ * The eviction discards a DIFFERENT command than the one being enqueued and
+ * then returns success. Callers that track what they have already sent — the
+ * games runtime keeps a per-key dirty cache so it only fans out cells whose
+ * colour actually changed — recorded the evicted position as delivered and
+ * never repainted it. That is why individual keys stayed lit on the peripheral
+ * and only came back when unrelated gameplay happened to paint over them.
+ *
+ * They also must not block. The games tick runs on the system workqueue, and a
+ * K_MSEC(100) wait per write stalls it for up to 800 ms per paced wipe pass,
+ * which defeats the pacing the wipe exists to provide.
+ *
+ * So for RGB: try once, and report -EAGAIN when the queue is full. Callers are
+ * expected to treat that as "not delivered" and retry on their next pass.
+ *
+ * Note this only reports queue admission. The dequeued command still goes out
+ * as an unacknowledged bt_gatt_write_without_response, so success here never
+ * proves the peripheral applied it. */
+static int split_bt_queue_command(struct central_cmd_wrapper payload_wrapper, bool drop_oldest) {
     LOG_DBG("");
 
-    int err = k_msgq_put(&zmk_split_central_split_run_msgq, &payload_wrapper, K_MSEC(100));
+    int err = k_msgq_put(&zmk_split_central_split_run_msgq, &payload_wrapper,
+                         drop_oldest ? K_MSEC(100) : K_NO_WAIT);
     if (err) {
-        switch (err) {
-        case -EAGAIN: {
+        /* Full is -ENOMSG with K_NO_WAIT, -EAGAIN once a timeout expires. */
+        if (err == -EAGAIN || err == -ENOMSG) {
+            if (!drop_oldest) {
+                return -EAGAIN;
+            }
             LOG_WRN("Run command message queue full, popping first message and queueing again");
             struct central_cmd_wrapper discarded_report;
             k_msgq_get(&zmk_split_central_split_run_msgq, &discarded_report, K_NO_WAIT);
-            return split_bt_invoke_behavior_payload(payload_wrapper);
+            return split_bt_queue_command(payload_wrapper, drop_oldest);
         }
-        default:
-            LOG_WRN("Failed to queue behavior to send (%d)", err);
-            return err;
-        }
+        LOG_WRN("Failed to queue command to send (%d)", err);
+        return err;
     }
 
     k_work_submit_to_queue(&split_central_split_run_q, &split_central_split_run_work);
@@ -1348,22 +1379,25 @@ static int split_central_bt_send_command(uint8_t source,
         return -EINVAL;
     }
 
+    struct central_cmd_wrapper wrapper = {.source = source, .cmd = cmd};
+
     switch (cmd.type) {
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_HID_INDICATORS:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_PHYSICAL_LAYOUT:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_INVOKE_BEHAVIOR:
+        return split_bt_queue_command(wrapper, true);
 #if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_LAYERS:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_COLOR:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_SAVE:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_DISCARD:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_CLEAR:
+    case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_CLEAR_PENDING:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_UNDERGLOW_STATE:
+        /* No eviction, no blocking — the caller retries. See
+         * split_bt_queue_command(). */
+        return split_bt_queue_command(wrapper, false);
 #endif
-    {
-        struct central_cmd_wrapper wrapper = {.source = source, .cmd = cmd};
-        return split_bt_invoke_behavior_payload(wrapper);
-    }
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_POLL_EVENTS:
         return -ENOTSUP;
     default:

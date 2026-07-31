@@ -48,6 +48,11 @@ int zmk_split_central_update_rgb_color(uint32_t layer_id, uint32_t key_pos, uint
 int zmk_split_central_rgb_save(void);
 int zmk_split_central_rgb_discard(void);
 int zmk_split_central_rgb_clear_layer(uint32_t layer_id);
+/* Peripheral-side counterpart of zmk_rgb_underglow_layer_clear_pending():
+ * drops the staged overrides only. Use this to release a layer a transient
+ * painter staged into; zmk_split_central_rgb_clear_layer() additionally
+ * drops whatever the user committed. */
+int zmk_split_central_rgb_clear_layer_pending(uint32_t layer_id);
 
 /* Push the full underglow state snapshot to every connected peripheral.
  * Caller passes the values it wants the peripheral to mirror; this

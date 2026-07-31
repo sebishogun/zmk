@@ -77,6 +77,16 @@ enum zmk_split_transport_central_command_type {
      * of CONFIG_ZMK_RGB_UNDERGLOW_BRT_START. Fixes the long-standing
      * "RH starts at 100% even though LH starts at 50%" desync. */
     ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_UNDERGLOW_STATE,
+    /* AuroraKey: clear only the STAGED per-key overrides for a layer,
+     * leaving committed ones alone. SET_RGB_CLEAR is the Studio "reset this
+     * layer" semantic and drops both; a transient painter like the games
+     * runtime stages without ever saving, so using SET_RGB_CLEAR on exit
+     * threw away the user's saved colours for the game layer too.
+     *
+     * Appended rather than slotted in next to SET_RGB_CLEAR: the wired
+     * transport serialises this enum by value, so inserting mid-list would
+     * renumber every command after it. */
+    ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_CLEAR_PENDING,
 } __packed;
 
 struct zmk_split_transport_central_command {

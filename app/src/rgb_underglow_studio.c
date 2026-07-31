@@ -142,6 +142,13 @@ void zmk_rgb_underglow_layer_clear(uint32_t layer_id) {
     mask_clear_all(pending_set_mask[idx]);
 }
 
+void zmk_rgb_underglow_layer_clear_pending(uint32_t layer_id) {
+    int idx = layer_id_to_index(layer_id);
+    if (idx < 0)
+        return;
+    mask_clear_all(pending_set_mask[idx]);
+}
+
 int zmk_rgb_underglow_layer_save(void) {
     for (int l = 0; l < LAYERS; l++) {
         for (int k = 0; k < KEYS; k++) {
