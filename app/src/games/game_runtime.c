@@ -269,6 +269,50 @@ static void tick_handler(struct k_work *work) {
     k_work_reschedule(&tick_work, K_MSEC(next));
 }
 
+/* ─── Peripheral clear, repeated ───────────────────────────────────── */
+
+#if GAME_FANOUT_TO_PERIPHERAL
+/* The clear-layer fanout is a single fire-and-forget GATT write with no
+ * acknowledgement, sent at the exact moment the split link is busiest —
+ * the last gameplay frame has just queued up to 80 colour writes ahead of
+ * it. zmk_split_central_rgb_clear_layer() returns -EAGAIN when the msgq
+ * is full, and deactivate() used to discard that. One drop and the
+ * peripheral keeps the finished game on screen indefinitely: nothing
+ * repaints layer 5 until the user enters it again, and the central's
+ * dirty cache has already been reset so it does not know RH is stale.
+ * That is the "sometimes it just doesn't clear" report.
+ *
+ * paint_one solves the same problem by leaving the cache dirty so the
+ * next frame retries. There is no next frame after exit, so retry
+ * explicitly: re-send a few times, spaced far enough apart that the
+ * queue has drained. Each send is 5 bytes, so this is cheap insurance
+ * rather than an optimisation worth tuning.
+ */
+#define CLEAR_RETRIES 4
+#define CLEAR_RETRY_MS 60
+
+static int clear_retries_left;
+
+static void clear_retry_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(clear_retry_work, clear_retry_handler);
+
+static void clear_retry_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+    int err = zmk_split_central_rgb_clear_layer((uint32_t)GAME_LAYER);
+    if (err < 0) {
+        LOG_DBG("peripheral clear retry failed (%d), %d left", err, clear_retries_left);
+    }
+    if (--clear_retries_left > 0) {
+        k_work_reschedule(&clear_retry_work, K_MSEC(CLEAR_RETRY_MS));
+    }
+}
+
+static void clear_peripheral_repeatedly(void) {
+    clear_retries_left = CLEAR_RETRIES;
+    k_work_reschedule(&clear_retry_work, K_NO_WAIT);
+}
+#endif /* GAME_FANOUT_TO_PERIPHERAL */
+
 /* ─── Cycle to the next game ────────────────────────────────────────── */
 
 static void cycle_to_next(void) {
@@ -329,8 +373,9 @@ static void deactivate(void) {
 #if GAME_FANOUT_TO_PERIPHERAL
     /* Index, not id — same split contract as paint_one above. With the
      * id, the peripheral cleared some other layer's buffer and left the
-     * game's pixels standing on RH after exit. */
-    zmk_split_central_rgb_clear_layer((uint32_t)GAME_LAYER);
+     * game's pixels standing on RH after exit. Repeated because a single
+     * write can be dropped and nothing would ever repaint RH. */
+    clear_peripheral_repeatedly();
 #endif
     cache_reset_unknown();
 }

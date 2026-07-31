@@ -196,12 +196,35 @@ static void move_cursor(int dx, int dy) {
 
 /* ─── Render ───────────────────────────────────────────────────────── */
 
+/* Conway carries twice the controls of the other two games and, unlike
+ * them, has no obvious goal to infer them from — a first-time player
+ * genuinely cannot tell RUN from PAUSE from EDIT, because a settled
+ * board and a paused one look identical. So the run/pause key doubles as
+ * the phase indicator:
+ *
+ *   green  RUN   — generations are advancing
+ *   amber  PAUSE — frozen, either by you or auto-paused on a still life
+ *   cyan   EDIT  — the cursor is live; move it and toggle cells
+ *
+ * Cyan matches the D-pad colour on purpose: in EDIT the arrows move a
+ * cursor rather than doing nothing, so the key that put you there is
+ * lit like the keys that became useful. Auto-pause on a stable board
+ * (conway.c step_generation) now also announces itself instead of the
+ * board just quietly stopping.
+ */
 static void conway_paint_legend(void) {
+    uint32_t phase_color = GAME_CTL_SELECT; /* CW_RUN */
+    if (C.phase == CW_PAUSE) {
+        phase_color = GAME_CTL_ALT;
+    } else if (C.phase == CW_EDIT) {
+        phase_color = GAME_CTL_DIR;
+    }
+
     game_paint_pos(KEY_RH_LEFT, GAME_CTL_DIR);
     game_paint_pos(KEY_RH_UP, GAME_CTL_DIR);
     game_paint_pos(KEY_RH_RIGHT, GAME_CTL_DIR);
     game_paint_pos(KEY_RH_DOWN, GAME_CTL_DIR);
-    game_paint_pos(KEY_LH_STARTPAUSE, GAME_CTL_SELECT);
+    game_paint_pos(KEY_LH_STARTPAUSE, phase_color);
     game_paint_pos(KEY_LH_TOGGLE, GAME_CTL_SELECT);
     game_paint_pos(KEY_LH_CLEAR, GAME_CTL_ALT);
     game_paint_pos(KEY_LH_STEP, GAME_CTL_ALT);
