@@ -136,6 +136,37 @@ uint8_t map_layer_id_to_index(zmk_keymap_layer_id_t layer_id) {
 
 #endif // IS_ENABLED(CONFIG_ZMK_KEYMAP_LAYER_REORDERING)
 
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER) && IS_ENABLED(CONFIG_ZMK_SPLIT)
+/* _zmk_keymap_layer_state is indexed by layer ID (see WRITE_BIT below).
+ * The peripheral is not: it has no reordering table, so
+ * peripheral_highest_layer_active() reads bit positions as layer
+ * INDICES and hands the result straight to the per-key RGB lookup,
+ * which is index-addressed. rgb_underglow_studio.c documents the same
+ * contract for colour writes — the central forwards already-resolved
+ * indices.
+ *
+ * ZMK_STUDIO_RPC selects ZMK_KEYMAP_LAYER_REORDERING, so on a Studio
+ * build ids and indices genuinely diverge, and sending the raw id-
+ * indexed bitmap told the peripheral the wrong layer was active. It
+ * then rendered a layer with no game pixels staged in it, so the games
+ * never appeared on the peripheral at all — and a clear aimed at the
+ * index could not reach the pixels stranded under the id.
+ *
+ * Convert here, where the mapping lives. With reordering off
+ * LAYER_INDEX_TO_ID is the identity and this is a no-op, so non-Studio
+ * builds are byte-identical in behaviour.
+ */
+static zmk_keymap_layers_state_t layer_state_by_index(zmk_keymap_layers_state_t by_id) {
+    zmk_keymap_layers_state_t by_index = 0;
+    for (uint8_t i = 0; i < ZMK_KEYMAP_LAYERS_LEN; i++) {
+        if (by_id & BIT(LAYER_INDEX_TO_ID(i))) {
+            WRITE_BIT(by_index, i, 1);
+        }
+    }
+    return by_index;
+}
+#endif
+
 static inline int set_layer_state(zmk_keymap_layer_id_t layer_id, bool state, bool locking) {
     int ret = 0;
     if (layer_id >= ZMK_KEYMAP_LAYERS_LEN) {
@@ -171,9 +202,11 @@ static inline int set_layer_state(zmk_keymap_layer_id_t layer_id, bool state, bo
         // Push the new layer bitmap to peripherals via the upstream transport
         // pipeline, then raise the same event locally on central so its own
         // RGB overlay listener updates. Synchronous — no event-manager race.
-        (void)zmk_split_central_update_layers(_zmk_keymap_layer_state);
+        // Index-addressed, not id-addressed — see layer_state_by_index.
+        const zmk_keymap_layers_state_t by_index = layer_state_by_index(_zmk_keymap_layer_state);
+        (void)zmk_split_central_update_layers(by_index);
         raise_zmk_split_peripheral_layer_changed(
-            (struct zmk_split_peripheral_layer_changed){.layers = _zmk_keymap_layer_state});
+            (struct zmk_split_peripheral_layer_changed){.layers = by_index});
 #endif
     }
 
