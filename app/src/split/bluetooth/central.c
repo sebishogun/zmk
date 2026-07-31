@@ -24,6 +24,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/behavior.h>
 #include <zmk/sensors.h>
 #include <zmk/split/transport/central.h>
+#include <zmk/split/central.h>
 #include <zmk/split/bluetooth/uuid.h>
 #include <zmk/split/bluetooth/service.h>
 #include <zmk/event_manager.h>
@@ -1282,45 +1283,63 @@ void split_central_split_run_callback(struct k_work *work) {
 
 K_WORK_DEFINE(split_central_split_run_work, split_central_split_run_callback);
 
-/* Behaviour invocations and layout/indicator updates keep the upstream policy:
- * block briefly, and if the queue is still full drop the OLDEST entry to make
- * room. A relayed keypress is time-sensitive, so the newest one is worth more
- * than a stale one, and the caller has nothing useful to do with a failure.
+/* Two admission policies, split on whether the CALLER can recover.
  *
- * RGB commands must not use that policy, for two reasons.
+ * Almost everything here must land and has no retry behind it. A relayed
+ * keypress, a physical-layout switch, an underglow state snapshot, a
+ * clear-layer, and above all the active-layer bitmap: each is sent once, from
+ * a caller that discards the result. For those, keep the upstream policy —
+ * block briefly, and if the queue is still full evict the OLDEST entry to make
+ * room. Losing the newest of these is strictly worse than losing an older one.
  *
- * The eviction discards a DIFFERENT command than the one being enqueued and
- * then returns success. Callers that track what they have already sent — the
- * games runtime keeps a per-key dirty cache so it only fans out cells whose
- * colour actually changed — recorded the evicted position as delivered and
- * never repainted it. That is why individual keys stayed lit on the peripheral
- * and only came back when unrelated gameplay happened to paint over them.
+ * SET_RGB_COLOR is the one exception, and the only high-volume producer. It is
+ * a per-pixel delta from the games runtime, which keeps a dirty cache and can
+ * repaint any cell it is told did not land. Evicting one of those is what
+ * stranded lit keys on the peripheral: the eviction discards a DIFFERENT
+ * command than the one being enqueued and still returns success, so the cache
+ * recorded the evicted position as delivered and never repainted it. Colour
+ * writes therefore get K_NO_WAIT and an honest -EAGAIN.
  *
- * They also must not block. The games tick runs on the system workqueue, and a
+ * They also must not block: the games tick runs on the system workqueue, and a
  * K_MSEC(100) wait per write stalls it for up to 800 ms per paced wipe pass,
- * which defeats the pacing the wipe exists to provide.
+ * defeating the pacing the wipe exists to provide.
  *
- * So for RGB: try once, and report -EAGAIN when the queue is full. Callers are
- * expected to treat that as "not delivered" and retry on their next pass.
+ * Getting this boundary wrong in the other direction is just as bad. Putting
+ * SET_RGB_LAYERS on the -EAGAIN path made the peripheral keep a finished game
+ * on screen: keymap.c pushes the bitmap exactly once per layer change with the
+ * result discarded, and a game exit is the moment the queue is fullest, so the
+ * push was refused and nothing resent it. The peripheral went on rendering the
+ * game layer. Only add a command to the retry path if its caller actually
+ * retries.
  *
- * Note this only reports queue admission. The dequeued command still goes out
+ * Note this reports queue admission only. The dequeued command still goes out
  * as an unacknowledged bt_gatt_write_without_response, so success here never
  * proves the peripheral applied it. */
-static int split_bt_queue_command(struct central_cmd_wrapper payload_wrapper, bool drop_oldest) {
+static int split_bt_queue_command(struct central_cmd_wrapper payload_wrapper, bool caller_retries) {
     LOG_DBG("");
 
     int err = k_msgq_put(&zmk_split_central_split_run_msgq, &payload_wrapper,
-                         drop_oldest ? K_MSEC(100) : K_NO_WAIT);
+                         caller_retries ? K_NO_WAIT : K_MSEC(100));
     if (err) {
         /* Full is -ENOMSG with K_NO_WAIT, -EAGAIN once a timeout expires. */
         if (err == -EAGAIN || err == -ENOMSG) {
-            if (!drop_oldest) {
+            if (caller_retries) {
                 return -EAGAIN;
             }
             LOG_WRN("Run command message queue full, popping first message and queueing again");
             struct central_cmd_wrapper discarded_report;
-            k_msgq_get(&zmk_split_central_split_run_msgq, &discarded_report, K_NO_WAIT);
-            return split_bt_queue_command(payload_wrapper, drop_oldest);
+            if (k_msgq_get(&zmk_split_central_split_run_msgq, &discarded_report, K_NO_WAIT) == 0) {
+#if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+                /* Evicting a colour write silently strands that pixel: its
+                 * sender was told it was delivered. Record it so the sender
+                 * can invalidate its cache and repaint. */
+                if (discarded_report.cmd.type ==
+                    ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_COLOR) {
+                    zmk_split_central_rgb_note_dropped_write();
+                }
+#endif
+            }
+            return split_bt_queue_command(payload_wrapper, caller_retries);
         }
         LOG_WRN("Failed to queue command to send (%d)", err);
         return err;
@@ -1385,18 +1404,22 @@ static int split_central_bt_send_command(uint8_t source,
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_HID_INDICATORS:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_PHYSICAL_LAYOUT:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_INVOKE_BEHAVIOR:
-        return split_bt_queue_command(wrapper, true);
+        return split_bt_queue_command(wrapper, false);
 #if IS_ENABLED(CONFIG_EXPERIMENTAL_RGB_LAYER)
+    /* Sent once, result discarded by the caller — these must land. The
+     * active-layer bitmap especially: it is what tells the peripheral which
+     * layer to render, so dropping it leaves a finished game on screen. */
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_LAYERS:
-    case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_COLOR:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_SAVE:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_DISCARD:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_CLEAR:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_CLEAR_PENDING:
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_UNDERGLOW_STATE:
-        /* No eviction, no blocking — the caller retries. See
-         * split_bt_queue_command(). */
         return split_bt_queue_command(wrapper, false);
+    /* The only command whose sender tracks delivery and repaints on refusal.
+     * See split_bt_queue_command(). */
+    case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_COLOR:
+        return split_bt_queue_command(wrapper, true);
 #endif
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_POLL_EVENTS:
         return -ENOTSUP;

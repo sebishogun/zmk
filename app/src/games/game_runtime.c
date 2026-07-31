@@ -296,6 +296,25 @@ static void tick_handler(struct k_work *work) {
     if (!game_active) {
         return;
     }
+#if GAME_FANOUT_TO_PERIPHERAL
+    /* A command that must land (a layer bitmap, a clear) can force the
+     * transport to evict an already-queued colour write. That write was
+     * reported delivered, so last_pushed[] believes the cell is current
+     * and will never re-send it. Drop the whole cache when the transport
+     * says it discarded one; the next pass repaints everything. Cheap and
+     * rare — evictions only happen when the link is saturated. */
+    static uint32_t seen_dropped_writes;
+    uint32_t dropped = zmk_split_central_rgb_dropped_writes();
+    if (dropped != seen_dropped_writes) {
+        seen_dropped_writes = dropped;
+        LOG_DBG("split dropped a colour write — invalidating paint cache");
+        cache_reset_unknown();
+        if (mode == MODE_WIPE) {
+            /* Positions the wipe already walked past are stale again. */
+            wipe_pos = 0;
+        }
+    }
+#endif
     if (mode == MODE_WIPE) {
         int end = wipe_pos + WIPE_PER_TICK;
         if (end > ZMK_KEYMAP_LEN) {

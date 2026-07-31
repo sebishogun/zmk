@@ -273,6 +273,17 @@ int zmk_split_central_rgb_clear_layer(uint32_t layer_id) {
     return 0;
 }
 
+/* Bumped by a transport whenever it discards an already-queued colour write to
+ * make room for a command that must land. The sender was told that write was
+ * delivered, so without this the pixel stays stale forever — its dirty cache
+ * will never re-send it. Senders poll the count and invalidate their cache when
+ * it moves. Monotonic; wrapping is fine, callers compare for inequality. */
+static uint32_t rgb_dropped_writes;
+
+void zmk_split_central_rgb_note_dropped_write(void) { rgb_dropped_writes++; }
+
+uint32_t zmk_split_central_rgb_dropped_writes(void) { return rgb_dropped_writes; }
+
 int zmk_split_central_rgb_clear_layer_pending(uint32_t layer_id) {
     if (!active_transport || !active_transport->api ||
         !active_transport->api->get_available_source_ids || !active_transport->api->send_command) {

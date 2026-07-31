@@ -54,6 +54,16 @@ int zmk_split_central_rgb_clear_layer(uint32_t layer_id);
  * drops whatever the user committed. */
 int zmk_split_central_rgb_clear_layer_pending(uint32_t layer_id);
 
+/* Colour writes are the one split command whose sender is expected to track
+ * delivery itself and repaint what did not land. A transport that has to
+ * discard an ALREADY-QUEUED colour write — to make room for a command that
+ * must land — calls the note function; that write was reported delivered, so
+ * nothing else will ever re-send it. Senders keeping a per-key cache should
+ * poll the count and drop their cache when it changes, forcing a full repaint.
+ * Monotonic and free-running; compare for inequality, not ordering. */
+void zmk_split_central_rgb_note_dropped_write(void);
+uint32_t zmk_split_central_rgb_dropped_writes(void);
+
 /* Push the full underglow state snapshot to every connected peripheral.
  * Caller passes the values it wants the peripheral to mirror; this
  * function encodes + dispatches via the active transport. Idempotent:
