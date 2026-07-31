@@ -166,6 +166,34 @@ void game_clear_all(void) {
     }
 }
 
+void game_canvas_fill(uint32_t color) {
+    if (!game_active) {
+        return;
+    }
+    /* Central: stage every key in one local loop. */
+    zmk_rgb_underglow_layer_fill(game_layer_id, color);
+#if GAME_FANOUT_TO_PERIPHERAL
+    int err = zmk_split_central_rgb_fill_layer((uint32_t)GAME_LAYER, color);
+    if (err == 0) {
+        /* Both halves hold `color` everywhere — say so, so the next
+         * frame only transmits cells that differ from it. */
+        for (int i = 0; i < ZMK_KEYMAP_LEN; i++) {
+            last_pushed[i] = color;
+        }
+    } else {
+        /* Peripheral unreachable. Leave the cache unknown so every
+         * subsequent paint transmits — the game's own draws become the
+         * repair as the link comes back. */
+        LOG_WRN("split fill refused (%d) — repainting per-pixel", err);
+        cache_reset_unknown();
+    }
+#else
+    for (int i = 0; i < ZMK_KEYMAP_LEN; i++) {
+        last_pushed[i] = color;
+    }
+#endif
+}
+
 /* The 12 thumb-cluster keys are NOT on the logical grid, so
  * game_paint_clear() (grid-only) never touches them and they used to
  * keep their DT-baked layer colour under the game. No special case any
@@ -266,28 +294,7 @@ static K_WORK_DELAYABLE_DEFINE(tick_work, tick_handler);
  * its name glyph on the fresh black first. See the run_mode comment for
  * why this is a fill command rather than 80 writes. */
 static void wipe_canvas_then(enum run_mode next) {
-    /* Central: stage every key OFF locally in one loop. */
-    zmk_rgb_underglow_layer_fill(game_layer_id, GAME_COLOR_OFF);
-#if GAME_FANOUT_TO_PERIPHERAL
-    int err = zmk_split_central_rgb_fill_layer((uint32_t)GAME_LAYER, GAME_COLOR_OFF);
-    if (err == 0) {
-        /* Both halves now hold OFF everywhere — the cache can say so,
-         * which lets the game's first frame skip re-sending black. */
-        for (int i = 0; i < ZMK_KEYMAP_LEN; i++) {
-            last_pushed[i] = GAME_COLOR_OFF;
-        }
-    } else {
-        /* Peripheral unreachable. Leave the cache unknown so every
-         * subsequent paint transmits — the game's own draws become the
-         * repair as the link comes back. */
-        LOG_WRN("split fill refused (%d) — repainting per-pixel", err);
-        cache_reset_unknown();
-    }
-#else
-    for (int i = 0; i < ZMK_KEYMAP_LEN; i++) {
-        last_pushed[i] = GAME_COLOR_OFF;
-    }
-#endif
+    game_canvas_fill(GAME_COLOR_OFF);
     if (next == MODE_SPLASH) {
         mode = MODE_SPLASH;
         splash_started = k_uptime_get();
