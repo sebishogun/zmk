@@ -153,19 +153,12 @@ void game_clear_all(void) {
 }
 
 /* The 12 thumb-cluster keys are NOT on the logical grid, so
- * game_paint_clear() (grid-only) never touches them — historically they
- * kept their DT-baked layer colour under the game ("colours not cleared
- * on start"). Clearing just these 12 on activation fixes that without
- * the 80-cell burst a full clear would cost on a fresh canvas. Games
- * then paint their control legend on top. */
-static const uint8_t thumb_keys[] = {GKEY_LH_TL, GKEY_EXIT,  GKEY_LH_TR, GKEY_RH_TL,
-                                     GKEY_RH_TM, GKEY_RH_TR, GKEY_LH_BL, GKEY_LH_BM,
-                                     GKEY_LH_BR, GKEY_CYCLE, GKEY_RH_BM, GKEY_RH_BR};
-static void clear_thumb(void) {
-    for (size_t i = 0; i < ARRAY_SIZE(thumb_keys); i++) {
-        paint_one((int)thumb_keys[i], GAME_COLOR_OFF);
-    }
-}
+ * game_paint_clear() (grid-only) never touches them and they used to
+ * keep their DT-baked layer colour under the game. That was handled by
+ * clearing just those 12 on activation, to avoid the cost of an 80-cell
+ * burst. The paced MODE_WIPE below now covers all 80 positions without
+ * the burst, so the special case is gone — thumbs are simply part of
+ * the canvas. */
 
 /* ─── Game registry (compiled-in modules) ──────────────────────────── */
 
@@ -186,8 +179,38 @@ static const struct game_module *const games[] = {
  * last-played game. */
 static int active = 0;
 
-enum run_mode { MODE_PLAYING, MODE_SPLASH };
+/* MODE_WIPE blanks the whole 80-key canvas BEFORE the game draws.
+ *
+ * A full-canvas clear is ~80 split writes. The central's split-bt msgq
+ * holds a small fraction of that, so firing them in one burst overruns
+ * it and the surplus is dropped. paint_one leaves the dirty cache stale
+ * on failure so the next frame retries — which rescues a game that
+ * repaints continuously, and does nothing for one that doesn't. Connect
+ * 4 only redraws on input, so a cell dropped during entry keeps its old
+ * colour until you happen to press something; Conway redraws each tick
+ * but visibly churns first.
+ *
+ * Snake carried its own paced WARMUP for exactly this reason. Doing it
+ * per-game meant the two games added later simply didn't have it, and
+ * inherited whatever was on the peripheral. Hoisted into the runtime so
+ * every game — now and later — gets a guaranteed-clean canvas, paced at
+ * WIPE_PER_TICK positions per pass so the queue drains between them.
+ */
+enum run_mode { MODE_WIPE, MODE_PLAYING, MODE_SPLASH };
 static enum run_mode mode = MODE_PLAYING;
+
+/* 8 per 20 ms pass clears all 80 keys in ~200 ms, comfortably inside the
+ * link's throughput while staying short enough to read as instant. */
+#define WIPE_PER_TICK 8
+#define WIPE_TICK_MS 20
+static int wipe_pos;
+
+/* Begin a paced full-canvas wipe; the tick handler runs it to completion
+ * and then calls dispatch_enter() for the incoming game. */
+static void begin_wipe(void) {
+    wipe_pos = 0;
+    mode = MODE_WIPE;
+}
 static int64_t splash_started = 0;
 
 static const struct game_module *cur(void) { return games[active]; }
@@ -246,16 +269,36 @@ static void tick_handler(struct k_work *work) {
     if (!game_active) {
         return;
     }
+    if (mode == MODE_WIPE) {
+        int end = wipe_pos + WIPE_PER_TICK;
+        if (end > ZMK_KEYMAP_LEN) {
+            end = ZMK_KEYMAP_LEN;
+        }
+        for (; wipe_pos < end; wipe_pos++) {
+            paint_one(wipe_pos, GAME_COLOR_OFF);
+        }
+        if (wipe_pos < ZMK_KEYMAP_LEN) {
+            k_work_reschedule(&tick_work, K_MSEC(WIPE_TICK_MS));
+            return;
+        }
+        /* Canvas is blank on both halves — hand over to the game. */
+        mode = MODE_PLAYING;
+        dispatch_enter();
+        int first = dispatch_tick_ms();
+        if (first < 20) {
+            first = 20;
+        }
+        k_work_reschedule(&tick_work, K_MSEC(first));
+        return;
+    }
     if (mode == MODE_SPLASH) {
         if (k_uptime_get() - splash_started >= SPLASH_MS) {
-            game_clear_all();
-            mode = MODE_PLAYING;
-            dispatch_enter();
-            int next = dispatch_tick_ms();
-            if (next < 20) {
-                next = 20;
-            }
-            k_work_reschedule(&tick_work, K_MSEC(next));
+            /* Paced wipe rather than game_clear_all()'s 80-write burst —
+             * the splash has just painted a glyph that must be gone
+             * before the next game draws, and this is the same
+             * transition that left colours stranded between games. */
+            begin_wipe();
+            k_work_reschedule(&tick_work, K_NO_WAIT);
         } else {
             k_work_reschedule(&tick_work, K_MSEC(50));
         }
@@ -346,10 +389,12 @@ static void activate(void) {
      * Clear the 12 thumb keys now (they're off-grid) so they don't bleed
      * the layer's colour before the game paints its control legend. */
     cache_reset_unknown();
-    clear_thumb();
     LOG_INF("game enter: %s (layer index=%d, id=%u)", cur()->name, (int)GAME_LAYER, game_layer_id);
-    dispatch_enter();
-    /* First tick immediately so the initial frame shows on entry. */
+    /* Wipe the full canvas — paced — before the game draws anything.
+     * Replaces the old clear_thumb() + "the game warms the grid up"
+     * arrangement, which only held for Snake and left Conway and
+     * Connect 4 drawing on top of whatever the peripheral still had. */
+    begin_wipe();
     k_work_reschedule(&tick_work, K_NO_WAIT);
 }
 
