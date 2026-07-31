@@ -53,8 +53,53 @@ LOG_MODULE_DECLARE(aurorakey_games, CONFIG_ZMK_LOG_LEVEL);
 #define KEY_LH_STEP 70
 #define KEY_LH_RANDOM 71
 
-#define COLOR_LIVE GAME_COLOR(0x00FF44)
+/* Cells are coloured by AGE — how many generations they have survived —
+ * not just alive/dead. Life on a flat single colour is a wall of
+ * identical dots: you cannot tell a still life from an oscillator, or
+ * see where the action is. Age grading makes the structure legible at a
+ * glance, and it is the thing that makes Life pretty rather than merely
+ * correct:
+ *
+ *   yellow  just born this generation — the active frontier
+ *   green   1-3 generations — churn
+ *   teal    4-8 generations — settling
+ *   blue    9+ generations — stable structures (blocks, still lifes)
+ *
+ * A random soup now reads as a yellow flash that burns down through
+ * green into a scatter of blue blocks, with any surviving oscillator
+ * pulsing yellow-green forever against them. Deliberately NOT white at
+ * the young end — white is the edit cursor and must stay unambiguous.
+ *
+ * Age lives in the same uint8_t as the alive flag (0 = dead, N = alive
+ * for N generations), so this costs no extra RAM. Everything that tests
+ * liveness already does `!= 0`, and step_generation's stability check
+ * compares aliveness rather than the stored byte, so auto-pause still
+ * fires on a still life whose cells keep ageing.
+ */
+#define COLOR_BORN GAME_COLOR(0xFFEE33)
+#define COLOR_YOUNG GAME_COLOR(0x00FF44)
+#define COLOR_MATURE GAME_COLOR(0x00CCAA)
+#define COLOR_OLD GAME_COLOR(0x2266FF)
 #define COLOR_CURSOR GAME_COLOR(0xFFFFFF)
+
+/* Clamped below UINT8_MAX so a long-lived cell can never wrap to 0 and
+ * silently "die" while still having live neighbours. */
+#define AGE_MAX 250
+
+static inline uint8_t age_inc(uint8_t age) { return age < AGE_MAX ? (uint8_t)(age + 1) : AGE_MAX; }
+
+static uint32_t cell_color(uint8_t age) {
+    if (age <= 1) {
+        return COLOR_BORN;
+    }
+    if (age <= 3) {
+        return COLOR_YOUNG;
+    }
+    if (age <= 8) {
+        return COLOR_MATURE;
+    }
+    return COLOR_OLD;
+}
 #define CURSOR_BLINK_MS 400
 #define STABLE_GENS_TO_PAUSE 3 /* auto-pause when nothing changes / extinction */
 
@@ -126,7 +171,10 @@ static void step_generation(void) {
             int n = neighbours(x, y);
             bool a = C.cells[x][y] != 0;
             bool na = a ? (n == 2 || n == 3) : (n == 3); /* B3/S23 */
-            C.next[x][y] = na ? 1 : 0;
+            /* Survivors age, births start at 1. The rule itself is
+             * unchanged — age is presentation only, and every liveness
+             * test is `!= 0`. */
+            C.next[x][y] = na ? (a ? age_inc(C.cells[x][y]) : 1) : 0;
             if (na != a) {
                 changed = true;
             }
@@ -240,7 +288,7 @@ static void conway_render(void) {
             if (game_board_cell_is_wall(x, y)) {
                 continue;
             }
-            uint32_t col = C.cells[x][y] ? COLOR_LIVE : GAME_COLOR_OFF;
+            uint32_t col = C.cells[x][y] ? cell_color(C.cells[x][y]) : GAME_COLOR_OFF;
             if (C.phase == CW_EDIT && C.cursor_on && x == C.cx && y == C.cy) {
                 col = COLOR_CURSOR;
             }
@@ -338,7 +386,7 @@ static int conway_tick_ms(void) {
 const struct game_module conway_module = {
     .name = "Life",
     .glyph = glyph_L,
-    .glyph_color = COLOR_LIVE,
+    .glyph_color = COLOR_YOUNG, /* the classic Life green, for the cycle splash */
     .enter = conway_enter,
     .exit = conway_exit,
     .tick = conway_tick,
