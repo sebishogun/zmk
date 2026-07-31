@@ -48,6 +48,26 @@ int zmk_split_central_update_rgb_color(uint32_t layer_id, uint32_t key_pos, uint
 int zmk_split_central_rgb_save(void);
 int zmk_split_central_rgb_discard(void);
 int zmk_split_central_rgb_clear_layer(uint32_t layer_id);
+/* Peripheral-side counterpart of zmk_rgb_underglow_layer_clear_pending():
+ * drops the staged overrides only. Use this to release a layer a transient
+ * painter staged into; zmk_split_central_rgb_clear_layer() additionally
+ * drops whatever the user committed. */
+int zmk_split_central_rgb_clear_layer_pending(uint32_t layer_id);
+/* Stage every key of a layer to one colour on the peripheral(s) — the
+ * split counterpart of zmk_rgb_underglow_layer_fill(). One command, one
+ * radio packet; the peripheral runs the 80-key loop locally. Same layer
+ * INDEX contract as zmk_split_central_update_rgb_color(). */
+int zmk_split_central_rgb_fill_layer(uint32_t layer_id, uint32_t color);
+
+/* Colour writes are the one split command whose sender is expected to track
+ * delivery itself and repaint what did not land. A transport that has to
+ * discard an ALREADY-QUEUED colour write — to make room for a command that
+ * must land — calls the note function; that write was reported delivered, so
+ * nothing else will ever re-send it. Senders keeping a per-key cache should
+ * poll the count and drop their cache when it changes, forcing a full repaint.
+ * Monotonic and free-running; compare for inequality, not ordering. */
+void zmk_split_central_rgb_note_dropped_write(void);
+uint32_t zmk_split_central_rgb_dropped_writes(void);
 
 /* Push the full underglow state snapshot to every connected peripheral.
  * Caller passes the values it wants the peripheral to mirror; this

@@ -15,7 +15,21 @@ int zmk_rgb_underglow_layer_stage_set(uint32_t layer_id, uint32_t key_pos, uint3
 int zmk_rgb_underglow_layer_set_transparent(uint32_t layer_id, bool transparent);
 int zmk_rgb_underglow_layer_get_color(uint32_t layer_id, uint32_t key_pos, uint32_t *out);
 bool zmk_rgb_underglow_layer_is_transparent(uint32_t layer_id);
+/* Drop BOTH the committed and the staged overrides for a layer — "reset this
+ * layer to its DT colours", which is what the Studio clear-layer RPC means. */
 void zmk_rgb_underglow_layer_clear(uint32_t layer_id);
+/* Drop only the STAGED overrides, leaving anything the user committed with
+ * "Save changes" intact. Transient painters (the games runtime) stage without
+ * ever saving, so this is how they release the layer: clearing the committed
+ * overlay too would silently discard the user's saved per-key colours for that
+ * layer until the next reboot reloaded them from NVS. */
+void zmk_rgb_underglow_layer_clear_pending(uint32_t layer_id);
+/* Stage EVERY key of a layer to one colour in a single call — the bulk
+ * form of stage_set. Exists so a transient painter can establish a
+ * uniform canvas without 80 individual writes; over the split link the
+ * matching SET_RGB_FILL command makes the peripheral do this loop
+ * locally, so the whole canvas costs one radio packet instead of 80. */
+void zmk_rgb_underglow_layer_fill(uint32_t layer_id, uint32_t color);
 int zmk_rgb_underglow_layer_save(void);
 void zmk_rgb_underglow_layer_discard(void);
 void zmk_rgb_underglow_layer_reset_all(void);

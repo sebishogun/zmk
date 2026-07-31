@@ -184,41 +184,90 @@ struct split_underglow_state_payload {
     uint8_t animation_speed;
 } __packed;
 
-static struct split_rgb_color_payload pending_rgb_color;
-static struct split_underglow_state_payload pending_underglow_state;
-static uint8_t pending_rgb_opcode;
-static uint32_t pending_rgb_clear_layer_id;
+/* Commands arrive on the BT RX thread (GATT write-without-response) and are
+ * applied on the system workqueue. Staging them in one set of `pending_*`
+ * globals behind a single k_work silently dropped writes: k_work_submit on an
+ * item that is already queued is a no-op, so a burst delivered inside one
+ * connection event collapsed to whichever write landed last. Everything before
+ * it was lost — including a clear_layer that a following set_color overwrote,
+ * which is why the peripheral sometimes kept a finished game on screen.
+ *
+ * The central cannot detect any of this: these are unacknowledged writes, and
+ * its per-key dirty cache has already recorded them as delivered, so nothing
+ * ever repaints the stranded cell. The renderer re-reads the staged colours
+ * every 50 ms, so a lost write means that LED holds its old colour until some
+ * unrelated paint happens to touch it.
+ *
+ * Queue the commands and drain the queue in the work handler instead. Then
+ * coalescing the *work item* is harmless — one run picks up everything queued.
+ * Depth covers a full-canvas repaint with headroom; the central paces well
+ * under that, so a full queue means something upstream is misbehaving and
+ * deserves a warning rather than another silent drop. */
+/* Fill-layer payload: stage every key of layer_id to color in one command.
+ * The whole point is that the 80-key loop runs HERE, so a full-canvas
+ * establishment costs one radio packet instead of 80. */
+struct split_rgb_fill_payload {
+    uint32_t layer_id;
+    uint32_t color;
+} __packed;
+
+struct split_rgb_cmd {
+    uint8_t opcode;
+    union {
+        struct split_rgb_color_payload color;
+        struct split_underglow_state_payload underglow;
+        struct split_rgb_fill_payload fill;
+        uint32_t clear_layer_id;
+    } data;
+};
+
+#define SPLIT_RGB_CMD_QUEUE_DEPTH (ZMK_KEYMAP_LEN + 16)
+
+K_MSGQ_DEFINE(split_rgb_cmd_msgq, sizeof(struct split_rgb_cmd), SPLIT_RGB_CMD_QUEUE_DEPTH, 4);
 
 static void split_svc_update_rgb_color_callback(struct k_work *work) {
-    switch (pending_rgb_opcode) {
-    case 0x01: // set_color
-        LOG_DBG("Applying RGB color: layer=%u key=%u color=0x%08x", pending_rgb_color.layer_id,
-                pending_rgb_color.key_pos, pending_rgb_color.color);
-        zmk_rgb_underglow_layer_stage_set(pending_rgb_color.layer_id, pending_rgb_color.key_pos,
-                                          pending_rgb_color.color);
-        break;
-    case 0x02: // save
-        LOG_DBG("RGB save from central");
-        zmk_rgb_underglow_layer_save();
-        break;
-    case 0x03: // discard
-        LOG_DBG("RGB discard from central");
-        zmk_rgb_underglow_layer_discard();
-        break;
-    case 0x04: // clear_layer
-        LOG_DBG("RGB clear layer %u from central", pending_rgb_clear_layer_id);
-        zmk_rgb_underglow_layer_clear(pending_rgb_clear_layer_id);
-        break;
-    case 0x05: // set_underglow_state (full hsb+on+effect+speed snapshot)
-        LOG_INF("applying remote underglow state h=%u s=%u b=%u on=%u eff=%u spd=%u",
-                pending_underglow_state.h, pending_underglow_state.s, pending_underglow_state.b,
-                pending_underglow_state.on, pending_underglow_state.current_effect,
-                pending_underglow_state.animation_speed);
-        zmk_rgb_underglow_apply_remote_state(
-            pending_underglow_state.h, pending_underglow_state.s, pending_underglow_state.b,
-            pending_underglow_state.on != 0, pending_underglow_state.current_effect,
-            pending_underglow_state.animation_speed);
-        break;
+    struct split_rgb_cmd cmd;
+
+    while (k_msgq_get(&split_rgb_cmd_msgq, &cmd, K_NO_WAIT) == 0) {
+        switch (cmd.opcode) {
+        case 0x01: // set_color
+            LOG_DBG("Applying RGB color: layer=%u key=%u color=0x%08x", cmd.data.color.layer_id,
+                    cmd.data.color.key_pos, cmd.data.color.color);
+            zmk_rgb_underglow_layer_stage_set(cmd.data.color.layer_id, cmd.data.color.key_pos,
+                                              cmd.data.color.color);
+            break;
+        case 0x02: // save
+            LOG_DBG("RGB save from central");
+            zmk_rgb_underglow_layer_save();
+            break;
+        case 0x03: // discard
+            LOG_DBG("RGB discard from central");
+            zmk_rgb_underglow_layer_discard();
+            break;
+        case 0x04: // clear_layer (committed + staged)
+            LOG_DBG("RGB clear layer %u from central", cmd.data.clear_layer_id);
+            zmk_rgb_underglow_layer_clear(cmd.data.clear_layer_id);
+            break;
+        case 0x05: // set_underglow_state (full hsb+on+effect+speed snapshot)
+            LOG_INF("applying remote underglow state h=%u s=%u b=%u on=%u eff=%u spd=%u",
+                    cmd.data.underglow.h, cmd.data.underglow.s, cmd.data.underglow.b,
+                    cmd.data.underglow.on, cmd.data.underglow.current_effect,
+                    cmd.data.underglow.animation_speed);
+            zmk_rgb_underglow_apply_remote_state(
+                cmd.data.underglow.h, cmd.data.underglow.s, cmd.data.underglow.b,
+                cmd.data.underglow.on != 0, cmd.data.underglow.current_effect,
+                cmd.data.underglow.animation_speed);
+            break;
+        case 0x06: // clear_layer, staged overrides only
+            LOG_DBG("RGB clear pending layer %u from central", cmd.data.clear_layer_id);
+            zmk_rgb_underglow_layer_clear_pending(cmd.data.clear_layer_id);
+            break;
+        case 0x07: // fill_layer: every key of the layer to one colour
+            LOG_DBG("RGB fill layer %u color 0x%08x from central", cmd.data.fill.layer_id,
+                    cmd.data.fill.color);
+            zmk_rgb_underglow_layer_fill(cmd.data.fill.layer_id, cmd.data.fill.color);
+            break;
+        }
     }
 }
 static K_WORK_DEFINE(split_svc_update_rgb_color_work, split_svc_update_rgb_color_callback);
@@ -230,28 +279,41 @@ static ssize_t split_svc_update_rgb_color(struct bt_conn *conn, const struct bt_
         return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
     }
     const uint8_t *data = buf;
-    pending_rgb_opcode = data[0];
-    switch (pending_rgb_opcode) {
+    struct split_rgb_cmd cmd = {.opcode = data[0]};
+
+    switch (cmd.opcode) {
     case 0x01: // set_color: 1 opcode + 12 payload
-        if (len < 13)
+        if (len < 1 + sizeof(cmd.data.color))
             return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
-        memcpy(&pending_rgb_color, &data[1], sizeof(pending_rgb_color));
+        memcpy(&cmd.data.color, &data[1], sizeof(cmd.data.color));
         break;
     case 0x04: // clear_layer: 1 opcode + 4 layer_id
-        if (len < 5)
+    case 0x06: // clear_layer_pending: same payload
+        if (len < 1 + sizeof(cmd.data.clear_layer_id))
             return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
-        memcpy(&pending_rgb_clear_layer_id, &data[1], 4);
+        memcpy(&cmd.data.clear_layer_id, &data[1], sizeof(cmd.data.clear_layer_id));
         break;
     case 0x05: // set_underglow_state: 1 opcode + 7 payload
-        if (len < 1 + sizeof(pending_underglow_state))
+        if (len < 1 + sizeof(cmd.data.underglow))
             return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
-        memcpy(&pending_underglow_state, &data[1], sizeof(pending_underglow_state));
+        memcpy(&cmd.data.underglow, &data[1], sizeof(cmd.data.underglow));
+        break;
+    case 0x07: // fill_layer: 1 opcode + 8 payload
+        if (len < 1 + sizeof(cmd.data.fill))
+            return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+        memcpy(&cmd.data.fill, &data[1], sizeof(cmd.data.fill));
         break;
     case 0x02: // save — no payload
     case 0x03: // discard — no payload
         break;
     default:
         return BT_GATT_ERR(BT_ATT_ERR_NOT_SUPPORTED);
+    }
+
+    /* K_NO_WAIT: this runs on the BT RX thread and must never block. */
+    if (k_msgq_put(&split_rgb_cmd_msgq, &cmd, K_NO_WAIT) != 0) {
+        LOG_WRN("RGB command queue full, dropping opcode 0x%02x", cmd.opcode);
+        return BT_GATT_ERR(BT_ATT_ERR_INSUFFICIENT_RESOURCES);
     }
     k_work_submit(&split_svc_update_rgb_color_work);
     return len;

@@ -273,6 +273,59 @@ int zmk_split_central_rgb_clear_layer(uint32_t layer_id) {
     return 0;
 }
 
+/* Bumped by a transport whenever it discards an already-queued colour write to
+ * make room for a command that must land. The sender was told that write was
+ * delivered, so without this the pixel stays stale forever — its dirty cache
+ * will never re-send it. Senders poll the count and invalidate their cache when
+ * it moves. Monotonic; wrapping is fine, callers compare for inequality. */
+static uint32_t rgb_dropped_writes;
+
+void zmk_split_central_rgb_note_dropped_write(void) { rgb_dropped_writes++; }
+
+uint32_t zmk_split_central_rgb_dropped_writes(void) { return rgb_dropped_writes; }
+
+int zmk_split_central_rgb_clear_layer_pending(uint32_t layer_id) {
+    if (!active_transport || !active_transport->api ||
+        !active_transport->api->get_available_source_ids || !active_transport->api->send_command) {
+        return -ENODEV;
+    }
+    uint8_t source_ids[ZMK_SPLIT_CENTRAL_PERIPHERAL_COUNT];
+    int ret = active_transport->api->get_available_source_ids(source_ids);
+    if (ret < 0)
+        return ret;
+    struct zmk_split_transport_central_command command = {
+        .type = ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_CLEAR_PENDING,
+        .data = {.set_rgb_clear = {.layer_id = layer_id}},
+    };
+    for (size_t i = 0; i < ret; i++) {
+        int err = active_transport->api->send_command(source_ids[i], command);
+        if (err < 0)
+            return err;
+    }
+    return 0;
+}
+
+int zmk_split_central_rgb_fill_layer(uint32_t layer_id, uint32_t color) {
+    if (!active_transport || !active_transport->api ||
+        !active_transport->api->get_available_source_ids || !active_transport->api->send_command) {
+        return -ENODEV;
+    }
+    uint8_t source_ids[ZMK_SPLIT_CENTRAL_PERIPHERAL_COUNT];
+    int ret = active_transport->api->get_available_source_ids(source_ids);
+    if (ret < 0)
+        return ret;
+    struct zmk_split_transport_central_command command = {
+        .type = ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_FILL,
+        .data = {.set_rgb_fill = {.layer_id = layer_id, .color = color}},
+    };
+    for (size_t i = 0; i < ret; i++) {
+        int err = active_transport->api->send_command(source_ids[i], command);
+        if (err < 0)
+            return err;
+    }
+    return 0;
+}
+
 int zmk_split_central_update_underglow_state(uint16_t h, uint8_t s, uint8_t b, bool on,
                                              uint8_t current_effect, uint8_t animation_speed) {
     if (!active_transport || !active_transport->api ||

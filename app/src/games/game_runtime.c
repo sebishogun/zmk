@@ -63,10 +63,17 @@ static uint32_t game_layer_id = 0;
 
 /* Per-key cache of the colour we last pushed over split-bt. Re-painting
  * the same colour is a no-op for the user and wasteful on the BLE link:
- * at 80 cells × 5 Hz = 400 writes/sec the central's split-bt msgq (cap
- * ~16) fills, the EAGAIN handler evicts the oldest write, and most of
- * the frame's pixels never reach RH. With this dirty cache we only fan
- * out cells whose colour actually changed. */
+ * at 80 cells × 5 Hz = 400 writes/sec the central's split-bt msgq
+ * (CONFIG_ZMK_SPLIT_BLE_CENTRAL_SPLIT_RUN_QUEUE_SIZE) fills and writes
+ * start bouncing. With this dirty cache we only fan out cells whose
+ * colour actually changed.
+ *
+ * The cache is only sound because a refused write leaves its entry
+ * stale — see paint_one. It used to be unsound: the central's queue
+ * reported success even when it had evicted a queued write to make room,
+ * so a cell could be cached as delivered while its write was discarded,
+ * and nothing ever repainted it. That is fixed in the split transport
+ * (RGB commands now return -EAGAIN instead of evicting). */
 static uint32_t last_pushed[ZMK_KEYMAP_LEN];
 /* Sentinel no real packed colour can equal — seeding the cache with it
  * forces the first paint of each cell to create an explicit overlay
@@ -82,10 +89,10 @@ static void cache_reset_unknown(void) {
 
 /* Returns true when the cell is known-good on BOTH halves — either it
  * already held this colour, or the write was accepted. False means the
- * split write was refused and the cell is still stale; the caller must
- * come back to it. Gameplay can ignore the result (the next frame
- * repaints anyway); the canvas wipe cannot, because there is no next
- * frame to rescue a position it has already walked past. */
+ * split write was refused and the cell is still stale; the dirty cache
+ * stays stale too, so the next paint of that cell re-sends. Gameplay
+ * ignores the result (frames repaint); canvas establishment no longer
+ * goes through here at all — see wipe_canvas_then(). */
 static bool paint_one(int pos, uint32_t color) {
     if (pos < 0 || pos >= ZMK_KEYMAP_LEN) {
         return true; /* nothing to do — not a real position */
@@ -161,11 +168,9 @@ void game_clear_all(void) {
 
 /* The 12 thumb-cluster keys are NOT on the logical grid, so
  * game_paint_clear() (grid-only) never touches them and they used to
- * keep their DT-baked layer colour under the game. That was handled by
- * clearing just those 12 on activation, to avoid the cost of an 80-cell
- * burst. The paced MODE_WIPE below now covers all 80 positions without
- * the burst, so the special case is gone — thumbs are simply part of
- * the canvas. */
+ * keep their DT-baked layer colour under the game. No special case any
+ * more: wipe_canvas_then()'s layer fill covers all 80 positions, thumbs
+ * included, before anything draws. */
 
 /* ─── Game registry (compiled-in modules) ──────────────────────────── */
 
@@ -186,44 +191,23 @@ static const struct game_module *const games[] = {
  * last-played game. */
 static int active = 0;
 
-/* MODE_WIPE blanks the whole 80-key canvas BEFORE the game draws.
+/* Every transition — entry, game-to-game cycle, splash-to-game — starts
+ * from an all-OFF canvas on BOTH halves via wipe_canvas_then() below.
  *
- * A full-canvas clear is ~80 split writes. The central's split-bt msgq
- * holds a small fraction of that, so firing them in one burst overruns
- * it and the surplus is dropped. paint_one leaves the dirty cache stale
- * on failure so the next frame retries — which rescues a game that
- * repaints continuously, and does nothing for one that doesn't. Connect
- * 4 only redraws on input, so a cell dropped during entry keeps its old
- * colour until you happen to press something; Conway redraws each tick
- * but visibly churns first.
+ * This used to be a paced per-pixel wipe: ~80 split writes at 8 per
+ * 20 ms pass, holding position on refusals. Correct, but structurally
+ * laggy — the central blanks its half locally in microseconds while the
+ * peripheral's copy trails by the whole sweep (200 ms on a quiet link,
+ * visibly longer under Conway churn, and a saturated link could exhaust
+ * the pass budget and leave cells stale). That asymmetry was the
+ * "right half doesn't clean up in time" report.
  *
- * Snake carried its own paced WARMUP for exactly this reason. Doing it
- * per-game meant the two games added later simply didn't have it, and
- * inherited whatever was on the peripheral. Hoisted into the runtime so
- * every game — now and later — gets a guaranteed-clean canvas, paced at
- * WIPE_PER_TICK positions per pass so the queue drains between them.
- */
-enum run_mode { MODE_WIPE, MODE_PLAYING, MODE_SPLASH };
+ * The SET_RGB_FILL split command removes the asymmetry: one 9-byte
+ * write tells the peripheral to run the 80-key loop itself, so both
+ * halves flip to black in one connection interval and the queue holds
+ * one entry instead of eighty. */
+enum run_mode { MODE_PLAYING, MODE_SPLASH };
 static enum run_mode mode = MODE_PLAYING;
-
-/* 8 per 20 ms pass clears all 80 keys in ~200 ms, comfortably inside the
- * link's throughput while staying short enough to read as instant. */
-#define WIPE_PER_TICK 8
-#define WIPE_TICK_MS 20
-/* 80 positions at 8 per pass needs 10 passes; allow generously more so a
- * busy link can stall repeatedly and still finish, while a dead link
- * still gives up inside a second rather than hanging on a black board. */
-#define WIPE_MAX_PASSES 50
-static int wipe_pos;
-static int wipe_passes;
-
-/* Begin a paced full-canvas wipe; the tick handler runs it to completion
- * and then calls dispatch_enter() for the incoming game. */
-static void begin_wipe(void) {
-    wipe_pos = 0;
-    wipe_passes = 0;
-    mode = MODE_WIPE;
-}
 static int64_t splash_started = 0;
 
 static const struct game_module *cur(void) { return games[active]; }
@@ -277,59 +261,75 @@ static void draw_splash(void) {
 static void tick_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(tick_work, tick_handler);
 
+/* Blank the whole canvas on both halves, then hand over to `next` —
+ * MODE_PLAYING enters the (already-selected) game, MODE_SPLASH flashes
+ * its name glyph on the fresh black first. See the run_mode comment for
+ * why this is a fill command rather than 80 writes. */
+static void wipe_canvas_then(enum run_mode next) {
+    /* Central: stage every key OFF locally in one loop. */
+    zmk_rgb_underglow_layer_fill(game_layer_id, GAME_COLOR_OFF);
+#if GAME_FANOUT_TO_PERIPHERAL
+    int err = zmk_split_central_rgb_fill_layer((uint32_t)GAME_LAYER, GAME_COLOR_OFF);
+    if (err == 0) {
+        /* Both halves now hold OFF everywhere — the cache can say so,
+         * which lets the game's first frame skip re-sending black. */
+        for (int i = 0; i < ZMK_KEYMAP_LEN; i++) {
+            last_pushed[i] = GAME_COLOR_OFF;
+        }
+    } else {
+        /* Peripheral unreachable. Leave the cache unknown so every
+         * subsequent paint transmits — the game's own draws become the
+         * repair as the link comes back. */
+        LOG_WRN("split fill refused (%d) — repainting per-pixel", err);
+        cache_reset_unknown();
+    }
+#else
+    for (int i = 0; i < ZMK_KEYMAP_LEN; i++) {
+        last_pushed[i] = GAME_COLOR_OFF;
+    }
+#endif
+    if (next == MODE_SPLASH) {
+        mode = MODE_SPLASH;
+        splash_started = k_uptime_get();
+        draw_splash();
+        k_work_reschedule(&tick_work, K_MSEC(50));
+        return;
+    }
+    mode = MODE_PLAYING;
+    dispatch_enter();
+    int first = dispatch_tick_ms();
+    if (first < 20) {
+        first = 20;
+    }
+    k_work_reschedule(&tick_work, K_MSEC(first));
+}
+
 static void tick_handler(struct k_work *work) {
     ARG_UNUSED(work);
     if (!game_active) {
         return;
     }
-    if (mode == MODE_WIPE) {
-        int end = wipe_pos + WIPE_PER_TICK;
-        if (end > ZMK_KEYMAP_LEN) {
-            end = ZMK_KEYMAP_LEN;
-        }
-        /* Do NOT advance past a position whose split write was refused.
-         * The queue is full right now; walking on would leave that LED
-         * showing its old colour with nothing left to repaint it — the
-         * wipe is the last pass before the game draws. Stop the pass
-         * here and resume from the same position once the queue has
-         * drained. This is why a stray key or two stayed lit until
-         * gameplay happened to paint over it. */
-        while (wipe_pos < end) {
-            if (!paint_one(wipe_pos, GAME_COLOR_OFF)) {
-                break;
-            }
-            wipe_pos++;
-        }
-        if (wipe_pos < ZMK_KEYMAP_LEN) {
-            if (++wipe_passes > WIPE_MAX_PASSES) {
-                /* Refusing forever means the link is down, not busy.
-                 * Hand over rather than sitting on a black board — the
-                 * game's own repaints become the fallback. */
-                LOG_WRN("canvas wipe gave up at pos %d after %d passes", wipe_pos, wipe_passes);
-                wipe_pos = ZMK_KEYMAP_LEN;
-            } else {
-                k_work_reschedule(&tick_work, K_MSEC(WIPE_TICK_MS));
-                return;
-            }
-        }
-        /* Canvas is blank on both halves — hand over to the game. */
-        mode = MODE_PLAYING;
-        dispatch_enter();
-        int first = dispatch_tick_ms();
-        if (first < 20) {
-            first = 20;
-        }
-        k_work_reschedule(&tick_work, K_MSEC(first));
-        return;
+#if GAME_FANOUT_TO_PERIPHERAL
+    /* A command that must land (a layer bitmap, a clear) can force the
+     * transport to evict an already-queued colour write. That write was
+     * reported delivered, so last_pushed[] believes the cell is current
+     * and will never re-send it. Drop the whole cache when the transport
+     * says it discarded one; the next pass repaints everything. Cheap and
+     * rare — evictions only happen when the link is saturated. */
+    static uint32_t seen_dropped_writes;
+    uint32_t dropped = zmk_split_central_rgb_dropped_writes();
+    if (dropped != seen_dropped_writes) {
+        seen_dropped_writes = dropped;
+        LOG_DBG("split dropped a colour write — invalidating paint cache");
+        cache_reset_unknown();
     }
+#endif
     if (mode == MODE_SPLASH) {
         if (k_uptime_get() - splash_started >= SPLASH_MS) {
-            /* Paced wipe rather than game_clear_all()'s 80-write burst —
-             * the splash has just painted a glyph that must be gone
-             * before the next game draws, and this is the same
-             * transition that left colours stranded between games. */
-            begin_wipe();
-            k_work_reschedule(&tick_work, K_NO_WAIT);
+            /* Splash over — blank the glyph and enter the game. The
+             * fill costs one queue entry, so this transition can no
+             * longer strand colours between games. */
+            wipe_canvas_then(MODE_PLAYING);
         } else {
             k_work_reschedule(&tick_work, K_MSEC(50));
         }
@@ -349,8 +349,8 @@ static void tick_handler(struct k_work *work) {
 /* The clear-layer fanout is a single fire-and-forget GATT write with no
  * acknowledgement, sent at the exact moment the split link is busiest —
  * the last gameplay frame has just queued up to 80 colour writes ahead of
- * it. zmk_split_central_rgb_clear_layer() returns -EAGAIN when the msgq
- * is full, and deactivate() used to discard that. One drop and the
+ * it. zmk_split_central_rgb_clear_layer_pending() returns -EAGAIN when the
+ * msgq is full, and deactivate() used to discard that. One drop and the
  * peripheral keeps the finished game on screen indefinitely: nothing
  * repaints layer 5 until the user enters it again, and the central's
  * dirty cache has already been reset so it does not know RH is stale.
@@ -364,17 +364,35 @@ static void tick_handler(struct k_work *work) {
  */
 #define CLEAR_RETRIES 4
 #define CLEAR_RETRY_MS 60
+/* A refused send means the queue was full, not that the clear was
+ * delivered and lost — it costs nothing but another pass, so it must not
+ * burn the retry budget. Cap total attempts so a down link still stops. */
+#define CLEAR_MAX_ATTEMPTS 16
 
 static int clear_retries_left;
+static int clear_attempts_left;
 
 static void clear_retry_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(clear_retry_work, clear_retry_handler);
 
 static void clear_retry_handler(struct k_work *work) {
     ARG_UNUSED(work);
-    int err = zmk_split_central_rgb_clear_layer((uint32_t)GAME_LAYER);
+    /* Pending-only: the game staged its pixels and never saved them, so
+     * dropping the committed overlay too would throw away whatever the
+     * user saved for this layer in Studio until the next reboot reloaded
+     * it from NVS. */
+    int err = zmk_split_central_rgb_clear_layer_pending((uint32_t)GAME_LAYER);
+    if (--clear_attempts_left <= 0) {
+        if (err < 0) {
+            LOG_WRN("peripheral clear gave up (%d)", err);
+        }
+        return;
+    }
     if (err < 0) {
-        LOG_DBG("peripheral clear retry failed (%d), %d left", err, clear_retries_left);
+        /* Queue full — retry without spending a repeat. */
+        LOG_DBG("peripheral clear refused (%d), retrying", err);
+        k_work_reschedule(&clear_retry_work, K_MSEC(CLEAR_RETRY_MS));
+        return;
     }
     if (--clear_retries_left > 0) {
         k_work_reschedule(&clear_retry_work, K_MSEC(CLEAR_RETRY_MS));
@@ -383,6 +401,7 @@ static void clear_retry_handler(struct k_work *work) {
 
 static void clear_peripheral_repeatedly(void) {
     clear_retries_left = CLEAR_RETRIES;
+    clear_attempts_left = CLEAR_MAX_ATTEMPTS;
     k_work_reschedule(&clear_retry_work, K_NO_WAIT);
 }
 #endif /* GAME_FANOUT_TO_PERIPHERAL */
@@ -393,14 +412,19 @@ static void cycle_to_next(void) {
     if (N_GAMES <= 1) {
         return; /* nothing to cycle to */
     }
-    dispatch_exit();
-    game_clear_all();
+    /* Only the active game is "entered" in PLAYING mode. A cycle press
+     * during the splash window (or any future non-PLAYING state) must
+     * not call exit() on a module whose enter() never ran — today every
+     * game's exit is a no-op, but that is luck, not a contract. Same
+     * guard deactivate() applies. */
+    if (mode == MODE_PLAYING) {
+        dispatch_exit();
+    }
     active = (active + 1) % N_GAMES;
-    mode = MODE_SPLASH;
-    splash_started = k_uptime_get();
     LOG_INF("game cycle -> %s", cur()->name);
-    draw_splash();
-    k_work_reschedule(&tick_work, K_MSEC(50));
+    /* Blank canvas first, splash on it after — one fill, so the new
+     * game's glyph can never land on top of the outgoing game. */
+    wipe_canvas_then(MODE_SPLASH);
 }
 
 /* ─── Activation / deactivation ───────────────────────────────────────── */
@@ -412,6 +436,16 @@ static void activate(void) {
     if (N_GAMES <= 0) {
         return;
     }
+#if GAME_FANOUT_TO_PERIPHERAL
+    /* The previous exit queued repeated clear-layer fanouts spread over
+     * the next few hundred ms. Re-entering the layer inside that window
+     * let a stale clear land AFTER the new wipe had already painted,
+     * blanking the peripheral's staged canvas while the dirty cache
+     * still recorded those cells as delivered — so nothing repainted
+     * them and the board came up with the previous game's colours on RH.
+     * Those clears are for a session that is over; drop them. */
+    k_work_cancel_delayable(&clear_retry_work);
+#endif
     game_layer_id = (uint32_t)zmk_keymap_layer_index_to_id((zmk_keymap_layer_index_t)GAME_LAYER);
     game_active = true;
     mode = MODE_PLAYING;
@@ -421,12 +455,12 @@ static void activate(void) {
      * the layer's colour before the game paints its control legend. */
     cache_reset_unknown();
     LOG_INF("game enter: %s (layer index=%d, id=%u)", cur()->name, (int)GAME_LAYER, game_layer_id);
-    /* Wipe the full canvas — paced — before the game draws anything.
-     * Replaces the old clear_thumb() + "the game warms the grid up"
-     * arrangement, which only held for Snake and left Conway and
-     * Connect 4 drawing on top of whatever the peripheral still had. */
-    begin_wipe();
-    k_work_reschedule(&tick_work, K_NO_WAIT);
+    /* Blank the full canvas on both halves before the game draws
+     * anything. Replaces the old clear_thumb() + "the game warms the
+     * grid up" arrangement, which only held for Snake and left Conway
+     * and Connect 4 drawing on top of whatever the peripheral still
+     * had. */
+    wipe_canvas_then(MODE_PLAYING);
 }
 
 static void deactivate(void) {
@@ -444,8 +478,11 @@ static void deactivate(void) {
     mode = MODE_PLAYING;
     k_work_cancel_delayable(&tick_work);
     /* Release every pixel we painted — the layer falls back to its
-     * configured colours. One clear-layer fanout so RH stops too. */
-    zmk_rgb_underglow_layer_clear(game_layer_id);
+     * configured colours. Pending-only: games stage and never save, so
+     * clearing the committed overlay as well would discard the per-key
+     * colours the user saved for this layer in Studio, leaving the layer
+     * on its DT colours until a reboot reloaded them from NVS. */
+    zmk_rgb_underglow_layer_clear_pending(game_layer_id);
 #if GAME_FANOUT_TO_PERIPHERAL
     /* Index, not id — same split contract as paint_one above. With the
      * id, the peripheral cleared some other layer's buffer and left the
@@ -494,8 +531,12 @@ static int on_position_state(const zmk_event_t *eh) {
         cycle_to_next();
         return ZMK_EV_EVENT_HANDLED;
     }
-    /* Ignore gameplay input during the cycle splash. */
-    if (mode == MODE_SPLASH) {
+    /* Only forward gameplay input once the module has actually been
+     * entered. During MODE_SPLASH the previous game has exited and the
+     * incoming one — which `active` already points at — has not seen
+     * enter() yet; dispatching into it would reach uninitialised game
+     * state. */
+    if (mode != MODE_PLAYING) {
         return ZMK_EV_EVENT_HANDLED;
     }
     /* Forward the rest of the thumb cluster to the active game. */

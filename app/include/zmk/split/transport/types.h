@@ -77,6 +77,24 @@ enum zmk_split_transport_central_command_type {
      * of CONFIG_ZMK_RGB_UNDERGLOW_BRT_START. Fixes the long-standing
      * "RH starts at 100% even though LH starts at 50%" desync. */
     ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_UNDERGLOW_STATE,
+    /* AuroraKey: clear only the STAGED per-key overrides for a layer,
+     * leaving committed ones alone. SET_RGB_CLEAR is the Studio "reset this
+     * layer" semantic and drops both; a transient painter like the games
+     * runtime stages without ever saving, so using SET_RGB_CLEAR on exit
+     * threw away the user's saved colours for the game layer too.
+     *
+     * Appended rather than slotted in next to SET_RGB_CLEAR: the wired
+     * transport serialises this enum by value, so inserting mid-list would
+     * renumber every command after it. */
+    ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_CLEAR_PENDING,
+    /* AuroraKey: stage every key of a layer to one colour in a single
+     * command. A full-canvas establishment done per pixel is ~80 split
+     * writes — the peripheral trails the central by the whole sweep (and
+     * under load, part of the sweep can be refused outright), which is
+     * why the right half blanked visibly later than the left on every
+     * game entry and game-to-game cycle. One fill is one queue slot and
+     * one radio packet: both halves flip together. */
+    ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_RGB_FILL,
 } __packed;
 
 struct zmk_split_transport_central_command {
@@ -112,6 +130,11 @@ struct zmk_split_transport_central_command {
         struct {
             uint32_t layer_id;
         } set_rgb_clear;
+
+        struct {
+            uint32_t layer_id;
+            uint32_t color;
+        } set_rgb_fill;
 
         /* Full underglow state snapshot. Sized to the smallest serialisable
          * form of struct rgb_underglow_state — animation_step is excluded

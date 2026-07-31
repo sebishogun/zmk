@@ -349,7 +349,11 @@ static void conway_input(uint32_t position) {
             C.phase = CW_EDIT;
         }
         if (!game_board_cell_is_wall(C.cx, C.cy)) {
-            C.cells[C.cx][C.cy] ^= 1;
+            /* Not `^= 1`: the byte carries AGE, so XOR on a cell that
+             * has survived ≥2 generations (5^1=4, 8^1=9…) leaves it
+             * alive — old blue cells refused to die in EDIT. Kill or
+             * birth outright. */
+            C.cells[C.cx][C.cy] = C.cells[C.cx][C.cy] ? 0 : 1;
         }
         C.stable_gens = 0;
         C.cursor_on = true;
