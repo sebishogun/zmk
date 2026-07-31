@@ -478,9 +478,12 @@ static void c4_render(void) {
     if (C.phase == C4_OVER) {
         int64_t age = k_uptime_get() - C.over_started;
         bool on = ((age / 300) % 2) == 0;
+        /* Draw-grey sits above the visibility floor on purpose: channel
+         * values are scaled by global brightness (b/255), so at the
+         * default 50% a 0x30 channel renders as ~9/255 — invisible. */
         uint32_t fc = (C.winner == RED)      ? COLOR_RED
                       : (C.winner == YELLOW) ? COLOR_YELLOW
-                                             : GAME_COLOR(0x303030); /* draw = grey */
+                                             : GAME_COLOR(0x808080); /* draw = grey */
         if (!on) {
             fc = GAME_COLOR_OFF;
         }
