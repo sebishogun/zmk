@@ -38,14 +38,24 @@
 #endif
 
 /* Row-major lookup: -1 = wall, else matrix position 0..79. The middle
- * columns (6, 7) on rows 0–3 are wrist gap; row 5 has narrow side
- * gaps where the thumb cluster lives. */
+ * columns (6, 7) are the wrist gap on EVERY row; row 5 has narrow side
+ * gaps where the thumb cluster lives.
+ *
+ * y=4 used to place RH keys 58/59 in the gap columns (x6/x7), making
+ * that one row continuous across the gap. Physically those are the RH
+ * bottom row's INNER two keys — the row's six keys sit under columns
+ * x8..x13 — so the whole RH bottom row was skewed two columns left.
+ * Games saw two phantom 1-key columns in the middle of the board (a
+ * Connect 4 cursor crossing them dropped to the bottom row and a piece
+ * "landed in place" instantly) while the two outermost RH columns had
+ * holes at y4 where their real keys belonged. Aligned to the physical
+ * columns; the gap is a wall on every row now. */
 static const int8_t xy[H][W] = {
     /* y=0 */ {0, 1, 2, 3, 4, -1, -1, -1, -1, 5, 6, 7, 8, 9},
     /* y=1 */ {10, 11, 12, 13, 14, 15, -1, -1, 16, 17, 18, 19, 20, 21},
     /* y=2 */ {22, 23, 24, 25, 26, 27, -1, -1, 28, 29, 30, 31, 32, 33},
     /* y=3 */ {34, 35, 36, 37, 38, 39, -1, -1, 40, 41, 42, 43, 44, 45},
-    /* y=4 */ {46, 47, 48, 49, 50, 51, 58, 59, 60, 61, 62, 63, -1, -1},
+    /* y=4 */ {46, 47, 48, 49, 50, 51, -1, -1, 58, 59, 60, 61, 62, 63},
     /* y=5 */ {64, 65, 66, 67, 68, -1, -1, -1, -1, 75, 76, 77, 78, 79},
 };
 

@@ -4,7 +4,7 @@
  * Two-player turn-based drop game rendered on the per-key RGB LEDs
  * across the ENTIRE playable grid — one shared board spanning both
  * halves, columns as physical key columns. The Glove80 grid is ragged
- * (columns are 1–6 keys tall, the wrist gap and thumb cluster are
+ * (columns are 4–6 keys tall, the wrist gap and thumb cluster are
  * walls), and the rules embrace that instead of carving out a clean
  * rectangle: pieces fall to the lowest empty VALID cell of a column,
  * and a win is WIN_LEN consecutive same-colour cells in a straight
@@ -465,8 +465,8 @@ static void start_game(enum side ai_side) {
     C.turn = RED;
     C.ai_side = ai_side;
     /* Start the cursor on a full-height column on Red's side — the
-     * centre-most columns are the 1-key stubs by the thumb cluster,
-     * which is a terrible place to first spot a white key. */
+     * centre-most "columns" are the wrist gap, so n_cols/2 would sit
+     * the cursor right next to nothing. */
     C.cursor_col = (C.side_red == SIDE_RIGHT) ? 9 : 4;
     if (C.cursor_col >= n_cols) {
         C.cursor_col = n_cols / 2;
