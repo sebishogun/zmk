@@ -75,6 +75,14 @@ LOG_MODULE_DECLARE(aurorakey_games, CONFIG_ZMK_LOG_LEVEL);
 #define COLOR_RED GAME_COLOR(0xFF0000)
 #define COLOR_YELLOW GAME_COLOR(0xFFCC00)
 #define COLOR_CURSOR GAME_COLOR(0xFFFFFF)
+/* Empty slots are NOT off — they are the frame, dim blue like the
+ * plastic of the physical game. Rendering empties as black made the
+ * board invisible: a fresh game was a dark keyboard with one white
+ * cursor key, and nothing showed that the whole surface IS the board.
+ * Kept well below the piece colours but above the visibility floor
+ * (channel values scale by global brightness, so anything under ~0x30
+ * disappears at the default 50%). */
+#define COLOR_FRAME GAME_COLOR(0x003060)
 
 /* Control keys. */
 #define KEY_RH_LEFT 55
@@ -456,7 +464,13 @@ static void start_game(enum side ai_side) {
     memset(C.fill, 0, sizeof(C.fill));
     C.turn = RED;
     C.ai_side = ai_side;
-    C.cursor_col = n_cols / 2;
+    /* Start the cursor on a full-height column on Red's side — the
+     * centre-most columns are the 1-key stubs by the thumb cluster,
+     * which is a terrible place to first spot a white key. */
+    C.cursor_col = (C.side_red == SIDE_RIGHT) ? 9 : 4;
+    if (C.cursor_col >= n_cols) {
+        C.cursor_col = n_cols / 2;
+    }
     cursor_normalize();
     C.phase = C4_PLAY;
     C.ai_pending = false;
@@ -513,9 +527,11 @@ static void to_lobby(void) {
     C.side_red = SIDE_LEFT;
     C.cursor_col = n_cols / 2;
     C.flash_on = -1;
-    /* The OVER flash may have washed the whole canvas — restore a black
-     * background in one fill; the board/legend repaint on top. */
-    game_canvas_fill(GAME_COLOR_OFF);
+    /* One fill paints the entire canvas in frame blue — the whole
+     * keyboard visibly becomes the board the instant Connect 4 appears,
+     * on both halves at once. It also erases whatever the OVER flash
+     * left. Legend and unused keys repaint over it on the next render. */
+    game_canvas_fill(COLOR_FRAME);
 }
 
 static void lobby_drop(enum side s) {
@@ -545,6 +561,12 @@ static void c4_paint_legend(void) {
     game_paint_pos(KEY_RESET, GAME_CTL_ALT);
     game_paint_pos(GKEY_EXIT, GAME_CTL_EXIT);
     game_paint_pos(GKEY_CYCLE, GAME_CTL_CYCLE);
+    /* Thumb keys Connect 4 doesn't use. The lobby fill washes the whole
+     * canvas in frame blue, so keys with no role must be explicitly
+     * dark or they read as part of the board. */
+    game_paint_pos(GKEY_LH_TL, GAME_COLOR_OFF);
+    game_paint_pos(GKEY_RH_BM, GAME_COLOR_OFF);
+    game_paint_pos(GKEY_RH_BR, GAME_COLOR_OFF);
 }
 
 /* Paint every valid cell: piece colour, the active player's cursor on
@@ -567,7 +589,7 @@ static void paint_board(void) {
             } else if (show_cursor && x == C.cursor_col && y == col_top_y[x]) {
                 col = COLOR_CURSOR;
             } else {
-                col = GAME_COLOR_OFF;
+                col = COLOR_FRAME; /* empty slot — visibly part of the board */
             }
             game_paint(x, y, col);
         }
