@@ -54,6 +54,14 @@ void game_paint_pos(uint32_t pos, uint32_t color);
  * it remains for games that want a mid-session full clear. */
 void game_clear_all(void);
 
+/* Set EVERY key — grid and thumb cluster — to one colour on both halves
+ * at fill-command cost: one local loop plus a single 9-byte split
+ * packet, instead of up to 80 per-pixel writes. Use for full-board
+ * moments (death/win wash, board-wide flash, respawn blank); per-pixel
+ * painting stays the right tool for everything else. The runtime uses
+ * the same primitive to blank the canvas on entry and game-cycle. */
+void game_canvas_fill(uint32_t color);
+
 /* ─── Thumb-cluster control keys (Glove80 matrix positions) ────────── */
 /*   LH top   [ 52  53  54 ]      RH top   [ 55  56  57 ]
  *   LH bottom[ 69  70  71 ]      RH bottom[ 72  73  74 ]

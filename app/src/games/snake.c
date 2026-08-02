@@ -69,13 +69,11 @@ LOG_MODULE_DECLARE(aurorakey_games, CONFIG_ZMK_LOG_LEVEL);
 #define ACCEL_PCT CONFIG_AURORAKEY_GAME_SNAKE_ACCEL_PCT
 #define MIN_TICK_MS 60
 
+/* No WARMUP phase any more: the canvas is established by the runtime's
+ * fill command (one packet, both halves), on entry and on every reset
+ * via game_canvas_fill(). The old paced OFF-painting pass predates that
+ * primitive and had become a ~1 s dead wait. */
 enum snake_phase {
-    PHASE_WARMUP, /* paint OFF on every cell over many ticks so the
-                   * black-canvas establishment doesn't burst-overrun
-                   * the split-bt run queue (size 5) on full-screen
-                   * mode. Without this, RH receives only the last 5
-                   * cells of an 80-cell push and the canvas never
-                   * lands. Costs ~1 s of preamble before INTRO. */
     PHASE_INTRO,
     PHASE_PLAYING,
     PHASE_PAUSED,
@@ -84,15 +82,10 @@ enum snake_phase {
 };
 
 #define INTRO_MS 1500
-/* DEAD / WON full-board flash duration. Long enough for the rate-limited
- * fill to cover all 80 cells (4 cells/tick × 20 ticks × 50 ms = 1000 ms);
- * after this elapses the render falls into body-only flash for the rest
- * of SNAKE_DEATH_FLASH_MS / SNAKE_WIN_FLASH_MS. */
+/* DEAD / WON: how long the full-board wash (a single canvas fill) stays
+ * solid before the render falls back to body-only flash for the rest of
+ * SNAKE_DEATH_FLASH_MS / SNAKE_WIN_FLASH_MS. */
 #define FULLBOARD_FLASH_MS 1000
-#define WARMUP_CELLS_PER_TICK                                                                      \
-    4 /* 80 cells / 4 per 50 ms tick = 1 s warmup. Stays under the BLE                             \
-       * write rate (~100/sec) so peripheral receives every cell. */
-#define WARMUP_TICK_MS 50
 
 struct cell {
     int8_t x;
@@ -123,14 +116,6 @@ struct snake {
     int prev_len;
     struct cell prev_food;
     bool prev_food_valid;
-    /* Warmup pass: row-major index of the next cell to paint OFF
-     * during PHASE_WARMUP. Advances WARMUP_CELLS_PER_TICK per tick
-     * until we've covered the whole board, then transitions to INTRO. */
-    int warmup_pos;
-    /* Same idea for the DEAD / WON full-board flash: paint the red /
-     * green wash incrementally to keep within the BLE budget. Reset
-     * to 0 in enter_phase whenever we transition into DEAD or WON. */
-    int flash_pos;
 };
 
 static struct snake S;
@@ -294,11 +279,12 @@ static void snake_reset(void) {
     S.dy = 0;
     S.dir_buffer_len = 0;
     S.tick_ms = snake_default_tick_ms();
-    /* Start in WARMUP, not INTRO. Warmup paints the black canvas
-     * incrementally so RH actually receives every cell instead of
-     * losing 75 of 80 to BLE-queue eviction. memset above already
-     * cleared warmup_pos / prev_len / prev_food_valid. */
-    S.phase = PHASE_WARMUP;
+    /* Blank the whole canvas in one fill — on a fresh entry this is a
+     * cheap no-op repeat of the runtime's own fill; after a death/win
+     * it is what erases the red/green wash instantly on both halves.
+     * Then straight into the GO splash. */
+    game_canvas_fill(GAME_COLOR_OFF);
+    S.phase = PHASE_INTRO;
     S.phase_started_ms = k_uptime_get();
     S.playable_cells = playable_cell_count();
     place_food();
@@ -357,8 +343,11 @@ static void enter_phase(enum snake_phase phase) {
     S.phase = phase;
     S.phase_started_ms = k_uptime_get();
     if (phase == PHASE_DEAD || phase == PHASE_WON) {
-        /* Restart the rate-limited flash from cell 0. */
-        S.flash_pos = 0;
+        /* Full-board wash in ONE fill — both halves flash together.
+         * The paced per-cell version walked past refused writes and
+         * left artifacts on the peripheral that survived into the next
+         * run. The legend is repainted by the very next render pass. */
+        game_canvas_fill(phase == PHASE_DEAD ? GAME_COLOR(0xFF0000) : GAME_COLOR(0x00FF00));
     }
 }
 
@@ -434,28 +423,6 @@ static void step_playing(void) {
 
 /* ─── Render ───────────────────────────────────────────────────────── */
 
-/* Fill the playable board with `color`, but spread across multiple
- * ticks so the BLE link doesn't choke. WARMUP_CELLS_PER_TICK cells
- * per call, advancing flash_pos in row-major order. After ~20 ticks
- * (1 s) every playable cell has been painted; subsequent ticks are
- * dirty-cache no-ops. Called from render() during DEAD / WON. */
-static void paint_full_board(uint32_t color) {
-    int playable_w = game_board.playable_x_max + 1;
-    int total = playable_w * game_board.height;
-    int end = S.flash_pos + WARMUP_CELLS_PER_TICK;
-    if (end > total) {
-        end = total;
-    }
-    for (int i = S.flash_pos; i < end; i++) {
-        int x = i % playable_w;
-        int y = i / playable_w;
-        if (!game_board_cell_is_wall(x, y)) {
-            game_paint(x, y, color);
-        }
-    }
-    S.flash_pos = end;
-}
-
 /* Render the "GO" intro splash. G on the LH side (logical cols 1..3,
  * rows 0..4); O on the RH side (cols 9..11, rows 0..4). Both sides
  * of the keyboard light up so the user immediately sees both halves
@@ -463,12 +430,11 @@ static void paint_full_board(uint32_t color) {
  * feel — at t=0 it's dim, peaks at t=INTRO_MS/2, settles to full
  * just before the game starts. */
 static void render_intro(void) {
-    /* Don't repaint per tick — warmup already established the OFF
-     * canvas, and any per-tick brightness change would push 18 letter
-     * cells × 20 Hz = 360 BLE writes/sec, miles over the link's
-     * drain rate (~100/sec). The dirty cache absorbs subsequent
-     * tick re-renders cleanly: paint each letter once at full
-     * brightness, the cache short-circuits every later tick. */
+    /* Don't repaint per tick — the reset's canvas fill established the
+     * OFF background, and any per-tick brightness change would push 18
+     * letter cells × 20 Hz = 360 BLE writes/sec over the link. Paint
+     * each letter once at full brightness; the dirty cache
+     * short-circuits every later tick. */
     int64_t age = k_uptime_get() - S.phase_started_ms;
     if (age < 0) {
         age = 0;
@@ -492,23 +458,6 @@ static void render_intro(void) {
             game_draw_glyph(glyph_O, 3, 0, color);
         }
     }
-}
-
-/* Paint WARMUP_CELLS_PER_TICK OFF cells per tick, walking the board
- * row-major. Drains naturally through the BLE queue at ~80 cells/sec
- * so RH receives every cell instead of losing 75 of 80 to eviction. */
-static void render_warmup(void) {
-    int total = game_board.width * game_board.height;
-    int end = S.warmup_pos + WARMUP_CELLS_PER_TICK;
-    if (end > total) {
-        end = total;
-    }
-    for (int i = S.warmup_pos; i < end; i++) {
-        int x = i % game_board.width;
-        int y = i / game_board.width;
-        game_paint(x, y, GAME_COLOR_OFF);
-    }
-    S.warmup_pos = end;
 }
 
 /* Steady-state diff-only render. Erases cells the snake vacated since
@@ -551,8 +500,7 @@ static void render_diff(void) {
         body_color = GAME_COLOR(((uint32_t)(b / 2)) << 8);
         break;
     }
-    case PHASE_WARMUP: /* unreachable */
-    case PHASE_INTRO:  /* unreachable */
+    case PHASE_INTRO: /* unreachable */
     case PHASE_PLAYING:
     default:
         head_color = GAME_COLOR(0x00FF00);
@@ -593,28 +541,17 @@ static void snake_paint_legend(void) {
 
 static void render(void) {
     snake_paint_legend();
-    if (S.phase == PHASE_WARMUP) {
-        render_warmup();
-        return;
-    }
     if (S.phase == PHASE_INTRO) {
         render_intro();
         return;
     }
-    /* DEAD / WON flash the entire board for the first ~400ms so the
-     * user gets an instant "screen flashed red/green" cue, then
-     * settle into the body-only flash for the remaining wait. The
-     * full-board paint here is a one-time burst per phase transition
-     * (dirty cache makes subsequent re-paints no-ops); BLE saturates
-     * for ~800 ms but that's during the flash which already pauses
-     * gameplay. */
+    /* DEAD / WON: enter_phase already washed the whole board red/green
+     * with a single fill, so while the solid-flash window runs there is
+     * nothing to paint (the legend above rides on top of the wash).
+     * After it elapses, settle into the body-only flash for the rest of
+     * the wait. */
     int64_t age = k_uptime_get() - S.phase_started_ms;
-    if (S.phase == PHASE_DEAD && age < FULLBOARD_FLASH_MS) {
-        paint_full_board(GAME_COLOR(0xFF0000));
-        return;
-    }
-    if (S.phase == PHASE_WON && age < FULLBOARD_FLASH_MS) {
-        paint_full_board(GAME_COLOR(0x00FF00));
+    if ((S.phase == PHASE_DEAD || S.phase == PHASE_WON) && age < FULLBOARD_FLASH_MS) {
         return;
     }
     render_diff();
@@ -624,15 +561,6 @@ static void render(void) {
 
 static void snake_enter(void) {
     snake_reset();
-    /* The runtime has just filled the whole canvas OFF on both halves,
-     * so WARMUP — a second, per-pixel pass painting OFF over OFF — is a
-     * pure 1 s wait here with every key dead. Skip straight to the GO
-     * splash. WARMUP stays in snake_reset() for death/win auto-resets,
-     * where the board is mid-flash red/green and the paced OFF pass is
-     * what erases it. */
-    S.phase = PHASE_INTRO;
-    S.phase_started_ms = k_uptime_get();
-    S.warmup_pos = game_board.width * game_board.height;
     render();
 }
 
@@ -641,12 +569,6 @@ static void snake_exit(void) { /* Nothing to do; runtime clears the layer's over
 static void snake_tick(void) {
     int64_t now = k_uptime_get();
     switch (S.phase) {
-    case PHASE_WARMUP:
-        if (S.warmup_pos >= game_board.width * game_board.height) {
-            S.phase = PHASE_INTRO;
-            S.phase_started_ms = now;
-        }
-        break;
     case PHASE_INTRO:
         if (now - S.phase_started_ms >= INTRO_MS) {
             S.phase = PHASE_PLAYING;
@@ -702,11 +624,6 @@ static void snake_input(uint32_t position) {
         }
         break;
     case KEY_LH_START:
-        if (S.phase == PHASE_WARMUP) {
-            /* Ignore — warmup must complete to establish the black
-             * canvas on RH; skipping leaves stale cells. ~1 s wait. */
-            break;
-        }
         if (S.phase == PHASE_INTRO) {
             /* Skip the splash — start playing immediately. */
             S.phase = PHASE_PLAYING;
@@ -731,12 +648,8 @@ static void snake_input(uint32_t position) {
 }
 
 static int snake_tick_ms(void) {
-    /* WARMUP / INTRO / PAUSED / DEAD / WON tick at 50 ms so the canvas
-     * fill + splash + flash animations stay smooth. Gameplay tick
-     * honours S.tick_ms. */
-    if (S.phase == PHASE_WARMUP) {
-        return WARMUP_TICK_MS;
-    }
+    /* INTRO / PAUSED / DEAD / WON tick at 50 ms so the splash + flash
+     * animations stay smooth. Gameplay tick honours S.tick_ms. */
     if (S.phase == PHASE_INTRO || S.phase == PHASE_PAUSED || S.phase == PHASE_DEAD ||
         S.phase == PHASE_WON) {
         return 50;

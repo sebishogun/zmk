@@ -1,11 +1,20 @@
 /*
  * AuroraKey games — Connect 4.
  *
- * Two-player turn-based drop game rendered on the per-key RGB LEDs. The
- * logical board (COLS×ROWS, default 6×5, WIN_LEN=4 — all Kconfig, so the
- * rules are general) is mirrored on BOTH halves so each player faces
- * their own copy; the white column cursor shows only on the player whose
- * turn it is.
+ * Two-player turn-based drop game rendered on the per-key RGB LEDs
+ * across the ENTIRE playable grid — one shared board spanning both
+ * halves, columns as physical key columns. The Glove80 grid is ragged
+ * (columns are 4–6 keys tall, the wrist gap and thumb cluster are
+ * walls), and the rules embrace that instead of carving out a clean
+ * rectangle: pieces fall to the lowest empty VALID cell of a column,
+ * and a win is WIN_LEN consecutive same-colour cells in a straight
+ * line where every step lands on a real key — walls break lines. So a
+ * short column simply can't host a vertical four, and lines never
+ * jump the wrist gap.
+ *
+ * The active player's column cursor is the white key at the TOP of the
+ * column; it skips full columns. LH player uses the LH thumb arrows,
+ * RH player the RH ones, so 2-player works face-to-face on one board.
  *
  * Controls (thumb cluster):
  *   RH player: 55 = ←, 57 = →, 56 = drop
@@ -18,9 +27,9 @@
  * starts vs the AI immediately.
  *
  * AI (difficulty 1..9, all moves legal): 1-2 random, 3-5 win/block/
- * center heuristic, 6-9 depth-bounded negamax + alpha-beta. Connect 4 is
- * solved but a full solver is overkill/RAM-heavy on the nRF52840;
- * depth-limited search is plenty strong on a 6×5 board.
+ * centre heuristic, 6-9 depth-bounded negamax + alpha-beta. Depth is
+ * capped low: the search runs on the system workqueue and the full
+ * board branches ~14 wide, so depth buys latency fast.
  *
  * Copyright (c) 2026 The ZMK Contributors / AuroraKey
  * SPDX-License-Identifier: MIT
@@ -39,17 +48,15 @@ LOG_MODULE_DECLARE(aurorakey_games, CONFIG_ZMK_LOG_LEVEL);
 
 #if IS_ENABLED(CONFIG_AURORAKEY_GAMES) && IS_ENABLED(CONFIG_AURORAKEY_GAME_CONNECT4)
 
-/* Full 6×5: the Glove80 LED grid is irregular (wrist gap + thumb cluster
- * are wall cells), so a 6-wide board can't be a clean rectangle on one
- * half NOR mirrored on both. Instead the board SPANS the wrist gap —
- * 3 full-height grid columns on each half (LH x2,3,4 + RH x9,10,11) —
- * giving a real 6×5 board plus a top cursor row (y0), all cells valid. */
-#ifndef CONFIG_AURORAKEY_GAME_CONNECT4_COLS
-#define CONFIG_AURORAKEY_GAME_CONNECT4_COLS 6
-#endif
-#ifndef CONFIG_AURORAKEY_GAME_CONNECT4_ROWS
-#define CONFIG_AURORAKEY_GAME_CONNECT4_ROWS 5
-#endif
+/* Storage maxima — the full logical grid. The board itself is derived
+ * from game_board at enter: every column x in [0, playable_x_max] with
+ * at least one non-wall cell is in play, at whatever height it has.
+ * CONFIG_AURORAKEY_GAME_CONNECT4_COLS / _ROWS still exist in Kconfig
+ * (the editor emits them) but are intentionally unused: the board IS
+ * the physical grid now, not a configured rectangle floating on it. */
+#define GMAX_W 14
+#define GMAX_H 6
+
 #ifndef CONFIG_AURORAKEY_GAME_CONNECT4_WIN_LEN
 #define CONFIG_AURORAKEY_GAME_CONNECT4_WIN_LEN 4
 #endif
@@ -60,25 +67,22 @@ LOG_MODULE_DECLARE(aurorakey_games, CONFIG_ZMK_LOG_LEVEL);
 #define CONFIG_AURORAKEY_GAME_CONNECT4_TICK_MS 200
 #endif
 
-#define COLS CONFIG_AURORAKEY_GAME_CONNECT4_COLS
-#define ROWS CONFIG_AURORAKEY_GAME_CONNECT4_ROWS
 #define WIN_LEN CONFIG_AURORAKEY_GAME_CONNECT4_WIN_LEN
 #define AI_LEVEL CONFIG_AURORAKEY_GAME_CONNECT4_AI_LEVEL
-/* Storage maxima — board fits one Glove80 half (cols 0..5, rows 1..5). */
-#define COLS_MAX 6
-#define ROWS_MAX 5
 
 #define RED 1
 #define YELLOW 2
 #define COLOR_RED GAME_COLOR(0xFF0000)
 #define COLOR_YELLOW GAME_COLOR(0xFFCC00)
 #define COLOR_CURSOR GAME_COLOR(0xFFFFFF)
-
-/* Board column → logical grid x. The board spans the wrist gap using the
- * full-height grid columns of each half (LH x2,3,4 + RH x9,10,11), which
- * are valid on every row y0..5. Board rows render on y1..ROWS, cursor on
- * y0. Supports up to 6 columns; fewer use the centre-most slots. */
-static const int8_t c4_gridx[6] = {2, 3, 4, 9, 10, 11};
+/* Empty slots are NOT off — they are the frame, dim blue like the
+ * plastic of the physical game. Rendering empties as black made the
+ * board invisible: a fresh game was a dark keyboard with one white
+ * cursor key, and nothing showed that the whole surface IS the board.
+ * Kept well below the piece colours but above the visibility floor
+ * (channel values scale by global brightness, so anything under ~0x30
+ * disappears at the default 50%). */
+#define COLOR_FRAME GAME_COLOR(0x003060)
 
 /* Control keys. */
 #define KEY_RH_LEFT 55
@@ -98,12 +102,12 @@ enum c4_phase { C4_LOBBY, C4_PLAY, C4_OVER };
 enum side { SIDE_NONE = -1, SIDE_LEFT = 0, SIDE_RIGHT = 1 };
 
 struct c4 {
-    int8_t board[COLS_MAX][ROWS_MAX]; /* [col][row], row 0 = bottom */
-    int8_t height[COLS_MAX];
+    int8_t grid[GMAX_W][GMAX_H]; /* [x][y], y0 = top row; 0 / RED / YELLOW */
+    int8_t fill[GMAX_W];         /* pieces currently in column x */
     enum c4_phase phase;
-    int turn;            /* RED / YELLOW */
-    enum side side_red;  /* which half plays Red */
-    enum side ai_side;   /* SIDE_NONE in 2-player */
+    int turn;           /* RED / YELLOW */
+    enum side side_red; /* which half plays Red */
+    enum side ai_side;  /* SIDE_NONE in 2-player */
     int cursor_col;
     enum side lobby_joiner;
     int64_t lobby_deadline;
@@ -111,10 +115,18 @@ struct c4 {
     int64_t ai_think_deadline;
     int winner; /* 0 = draw, else RED/YELLOW */
     int64_t over_started;
+    int8_t flash_on; /* OVER flash state; -1 = not yet painted */
 };
 
 static struct c4 C;
-static int col_order[COLS_MAX]; /* centre-out, for AI ordering + cursor feel */
+
+/* Derived geometry — computed once per enter from game_board, constant
+ * for the session. cap = key count of the column, top_y = its topmost
+ * valid row (where the cursor renders), n_cols = playable_x_max + 1. */
+static int8_t col_cap[GMAX_W];
+static int8_t col_top_y[GMAX_W];
+static int n_cols;
+static int col_order[GMAX_W]; /* centre-out, for AI ordering */
 
 /* "4" — cycle name-splash glyph. */
 static const uint8_t glyph_4[GLYPH_H] = {
@@ -125,24 +137,82 @@ static const uint8_t glyph_4[GLYPH_H] = {
     0b001, /* ..#  */
 };
 
+static void init_geometry(void) {
+    n_cols = game_board.playable_x_max + 1;
+    if (n_cols > GMAX_W) {
+        n_cols = GMAX_W;
+    }
+    for (int x = 0; x < n_cols; x++) {
+        col_cap[x] = 0;
+        col_top_y[x] = -1;
+        for (int y = 0; y < game_board.height && y < GMAX_H; y++) {
+            if (!game_board_cell_is_wall(x, y)) {
+                col_cap[x]++;
+                if (col_top_y[x] < 0) {
+                    col_top_y[x] = (int8_t)y;
+                }
+            }
+        }
+    }
+    /* Centre-out column ordering: good alpha-beta move ordering, and
+     * the same list drives "prefer centre" at heuristic levels. */
+    int idx = 0;
+    int c = n_cols / 2;
+    col_order[idx++] = c;
+    for (int off = 1; idx < n_cols; off++) {
+        if (c - off >= 0) {
+            col_order[idx++] = c - off;
+        }
+        if (idx < n_cols && c + off < n_cols) {
+            col_order[idx++] = c + off;
+        }
+    }
+}
+
 /* ─── Board mechanics (operate on the live board; AI mutates + undoes) ─ */
+
+static inline bool cell_valid(int x, int y) {
+    return x >= 0 && x < n_cols && y >= 0 && y < game_board.height &&
+           !game_board_cell_is_wall(x, y);
+}
+
+static bool col_full(int x) { return C.fill[x] >= col_cap[x]; }
+
+/* Row a piece dropped in column x lands on: the lowest (largest y)
+ * valid AND empty cell. -1 when the column is full or has no keys.
+ * Ragged columns fall out naturally — on a column with a mid-column
+ * wall (x12/x13 skip y4) the piece "falls past" the missing key. */
+static int drop_y(int x) {
+    if (x < 0 || x >= n_cols) {
+        return -1;
+    }
+    for (int y = game_board.height - 1; y >= 0; y--) {
+        if (cell_valid(x, y) && C.grid[x][y] == 0) {
+            return y;
+        }
+    }
+    return -1;
+}
 
 static const int DIRS[4][2] = {{1, 0}, {0, 1}, {1, 1}, {1, -1}};
 
-static int count_dir(int c, int r, int dc, int dr, int player) {
-    int n = 0, cc = c + dc, rr = r + dr;
-    while (cc >= 0 && cc < COLS && rr >= 0 && rr < ROWS && C.board[cc][rr] == player) {
+/* Count same-player cells from (x,y) walking (dx,dy). A wall, the board
+ * edge, or any other value ends the line — lines never cross the wrist
+ * gap or a missing key. */
+static int count_dir(int x, int y, int dx, int dy, int player) {
+    int n = 0, cx = x + dx, cy = y + dy;
+    while (cell_valid(cx, cy) && C.grid[cx][cy] == player) {
         n++;
-        cc += dc;
-        rr += dr;
+        cx += dx;
+        cy += dy;
     }
     return n;
 }
 
-static bool wins_at(int c, int r, int player) {
+static bool wins_at(int x, int y, int player) {
     for (int d = 0; d < 4; d++) {
-        int total = 1 + count_dir(c, r, DIRS[d][0], DIRS[d][1], player) +
-                    count_dir(c, r, -DIRS[d][0], -DIRS[d][1], player);
+        int total = 1 + count_dir(x, y, DIRS[d][0], DIRS[d][1], player) +
+                    count_dir(x, y, -DIRS[d][0], -DIRS[d][1], player);
         if (total >= WIN_LEN) {
             return true;
         }
@@ -151,52 +221,45 @@ static bool wins_at(int c, int r, int player) {
 }
 
 static bool board_full(void) {
-    for (int c = 0; c < COLS; c++) {
-        if (C.height[c] < ROWS) {
+    for (int x = 0; x < n_cols; x++) {
+        if (!col_full(x)) {
             return false;
         }
     }
     return true;
 }
 
-static void build_col_order(void) {
-    int idx = 0;
-    int c = COLS / 2;
-    col_order[idx++] = c;
-    for (int off = 1; idx < COLS; off++) {
-        if (c - off >= 0) {
-            col_order[idx++] = c - off;
-        }
-        if (idx < COLS && c + off < COLS) {
-            col_order[idx++] = c + off;
-        }
-    }
+static void place_at(int x, int y, int player) {
+    C.grid[x][y] = (int8_t)player;
+    C.fill[x]++;
+}
+
+static void unplace_at(int x, int y) {
+    C.grid[x][y] = 0;
+    C.fill[x]--;
 }
 
 /* ─── AI ───────────────────────────────────────────────────────────── */
 
+/* Score every WIN_LEN window whose cells are ALL valid — windows that
+ * touch a wall or the edge can never complete, so they score nothing.
+ * That automatically devalues short columns and gap-adjacent lines. */
 static int eval_for(int player) {
     int opp = 3 - player;
     int score = 0;
-    int centre = COLS / 2;
-    for (int r = 0; r < ROWS; r++) {
-        if (C.board[centre][r] == player) {
-            score += 3;
-        }
-    }
-    for (int c = 0; c < COLS; c++) {
-        for (int r = 0; r < ROWS; r++) {
+    for (int x = 0; x < n_cols; x++) {
+        for (int y = 0; y < game_board.height; y++) {
             for (int d = 0; d < 4; d++) {
                 int pc = 0, oc = 0;
                 bool ok = true;
                 for (int k = 0; k < WIN_LEN; k++) {
-                    int cc = c + DIRS[d][0] * k;
-                    int rr = r + DIRS[d][1] * k;
-                    if (cc < 0 || cc >= COLS || rr < 0 || rr >= ROWS) {
+                    int cx = x + DIRS[d][0] * k;
+                    int cy = y + DIRS[d][1] * k;
+                    if (!cell_valid(cx, cy)) {
                         ok = false;
                         break;
                     }
-                    int v = C.board[cc][rr];
+                    int v = C.grid[cx][cy];
                     if (v == player) {
                         pc++;
                     } else if (v == opp) {
@@ -222,25 +285,23 @@ static int eval_for(int player) {
 static int negamax(int depth, int alpha, int beta, int player) {
     int best = -AI_WIN * 4;
     bool moved = false;
-    for (int i = 0; i < COLS; i++) {
+    for (int i = 0; i < n_cols; i++) {
         int col = col_order[i];
-        if (C.height[col] >= ROWS) {
+        int y = drop_y(col);
+        if (y < 0) {
             continue;
         }
         moved = true;
-        int r = C.height[col];
-        C.board[col][r] = (int8_t)player;
-        C.height[col]++;
+        place_at(col, y, player);
         int sc;
-        if (wins_at(col, r, player)) {
+        if (wins_at(col, y, player)) {
             sc = AI_WIN - (50 - depth); /* prefer faster wins */
         } else if (depth <= 1) {
             sc = eval_for(player);
         } else {
             sc = -negamax(depth - 1, -beta, -alpha, 3 - player);
         }
-        C.height[col]--;
-        C.board[col][r] = 0;
+        unplace_at(col, y);
         if (sc > best) {
             best = sc;
         }
@@ -257,43 +318,58 @@ static int negamax(int depth, int alpha, int beta, int player) {
     return best;
 }
 
-/* level → search depth. Capped at 6 to keep the recursion comfortably
- * within the system work-queue stack; depth 6 alpha-beta on 6×5 is
- * already very strong. */
-static int ai_depth(int level) { return (level < 6) ? 0 : (level - 3); }
+/* level → search depth. The full board branches ~14 wide and the search
+ * runs on the SYSTEM WORKQUEUE, so depth buys wall-clock stall fast:
+ * depth 4 with alpha-beta is already tens of thousands of nodes. Capped
+ * accordingly — strong play on this ragged board comes mostly from the
+ * win/block pre-checks anyway. */
+static int ai_depth(int level) {
+    switch (level) {
+    case 6:
+        return 2;
+    case 7:
+        return 3;
+    case 8:
+        return 3;
+    case 9:
+        return 4;
+    default:
+        return 0;
+    }
+}
 
 static bool move_wins(int col, int player) {
-    int r = C.height[col];
-    C.board[col][r] = (int8_t)player;
-    C.height[col]++;
-    bool w = wins_at(col, r, player);
-    C.height[col]--;
-    C.board[col][r] = 0;
+    int y = drop_y(col);
+    if (y < 0) {
+        return false;
+    }
+    place_at(col, y, player);
+    bool w = wins_at(col, y, player);
+    unplace_at(col, y);
     return w;
 }
 
 /* Does dropping at `col` for `player` hand the opponent an immediate win? */
 static bool move_gives_win(int col, int player) {
     int opp = 3 - player;
-    int r = C.height[col];
-    C.board[col][r] = (int8_t)player;
-    C.height[col]++;
-    bool gives = false;
-    for (int j = 0; j < COLS && !gives; j++) {
-        if (C.height[j] < ROWS) {
-            gives = move_wins(j, opp);
-        }
+    int y = drop_y(col);
+    if (y < 0) {
+        return false;
     }
-    C.height[col]--;
-    C.board[col][r] = 0;
+    place_at(col, y, player);
+    bool gives = false;
+    for (int j = 0; j < n_cols && !gives; j++) {
+        gives = move_wins(j, opp);
+    }
+    unplace_at(col, y);
     return gives;
 }
 
 static int ai_choose(int player, int level) {
-    int legal[COLS_MAX], nl = 0;
-    for (int i = 0; i < COLS; i++) {
+    int legal[GMAX_W], nl = 0;
+    for (int i = 0; i < n_cols; i++) {
         int col = col_order[i];
-        if (C.height[col] < ROWS) {
+        if (drop_y(col) >= 0) {
             legal[nl++] = col;
         }
     }
@@ -337,12 +413,10 @@ static int ai_choose(int player, int level) {
     int best = -AI_WIN * 8, bestcol = legal[0];
     for (int i = 0; i < nl; i++) {
         int col = legal[i];
-        int r = C.height[col];
-        C.board[col][r] = (int8_t)player;
-        C.height[col]++;
-        int sc = wins_at(col, r, player) ? AI_WIN : -negamax(depth - 1, -AI_WIN * 8, AI_WIN * 8, 3 - player);
-        C.height[col]--;
-        C.board[col][r] = 0;
+        int y = drop_y(col);
+        place_at(col, y, player);
+        int sc = wins_at(col, y, player) ? AI_WIN : -negamax(depth - 1, -AI_WIN * 8, AI_WIN * 8, 3 - player);
+        unplace_at(col, y);
         if (sc > best) {
             best = sc;
             bestcol = col;
@@ -368,50 +442,81 @@ static void maybe_schedule_ai(void) {
     }
 }
 
+/* Keep the cursor on a droppable column, preferring the nearest one. */
+static void cursor_normalize(void) {
+    if (drop_y(C.cursor_col) >= 0) {
+        return;
+    }
+    for (int off = 1; off < n_cols; off++) {
+        if (C.cursor_col - off >= 0 && drop_y(C.cursor_col - off) >= 0) {
+            C.cursor_col -= off;
+            return;
+        }
+        if (C.cursor_col + off < n_cols && drop_y(C.cursor_col + off) >= 0) {
+            C.cursor_col += off;
+            return;
+        }
+    }
+}
+
 static void start_game(enum side ai_side) {
-    memset(C.board, 0, sizeof(C.board));
-    memset(C.height, 0, sizeof(C.height));
+    memset(C.grid, 0, sizeof(C.grid));
+    memset(C.fill, 0, sizeof(C.fill));
     C.turn = RED;
     C.ai_side = ai_side;
-    C.cursor_col = COLS / 2;
+    /* Start the cursor on a full-height column on Red's side — the
+     * centre-most "columns" are the wrist gap, so n_cols/2 would sit
+     * the cursor right next to nothing. */
+    C.cursor_col = (C.side_red == SIDE_RIGHT) ? 9 : 4;
+    if (C.cursor_col >= n_cols) {
+        C.cursor_col = n_cols / 2;
+    }
+    cursor_normalize();
     C.phase = C4_PLAY;
     C.ai_pending = false;
     maybe_schedule_ai();
 }
 
 static void place_move(int col) {
-    if (col < 0 || col >= COLS || C.height[col] >= ROWS) {
+    int y = drop_y(col);
+    if (y < 0) {
         return; /* illegal / full — ignore */
     }
     int color = C.turn;
-    int r = C.height[col];
-    C.board[col][r] = (int8_t)color;
-    C.height[col]++;
-    if (wins_at(col, r, color)) {
+    place_at(col, y, color);
+    if (wins_at(col, y, color)) {
         C.winner = color;
         C.phase = C4_OVER;
         C.over_started = k_uptime_get();
+        C.flash_on = -1;
         return;
     }
     if (board_full()) {
         C.winner = 0;
         C.phase = C4_OVER;
         C.over_started = k_uptime_get();
+        C.flash_on = -1;
         return;
     }
     C.turn = 3 - color;
+    cursor_normalize();
     maybe_schedule_ai();
 }
 
+/* Skip full columns while moving — the cursor only ever sits where a
+ * piece can actually go. */
 static void cursor_move(int d) {
-    int nc = C.cursor_col + d;
-    if (nc < 0) {
-        nc = 0;
+    int nc = C.cursor_col;
+    for (int step = 0; step < n_cols; step++) {
+        nc += d;
+        if (nc < 0 || nc >= n_cols) {
+            return; /* edge — stay put */
+        }
+        if (drop_y(nc) >= 0) {
+            C.cursor_col = nc;
+            return;
+        }
     }
-    if (nc >= COLS) {
-        nc = COLS - 1;
-    }
-    C.cursor_col = nc;
 }
 
 static void to_lobby(void) {
@@ -420,7 +525,13 @@ static void to_lobby(void) {
     C.lobby_joiner = SIDE_NONE;
     C.ai_side = SIDE_NONE;
     C.side_red = SIDE_LEFT;
-    C.cursor_col = COLS / 2;
+    C.cursor_col = n_cols / 2;
+    C.flash_on = -1;
+    /* One fill paints the entire canvas in frame blue — the whole
+     * keyboard visibly becomes the board the instant Connect 4 appears,
+     * on both halves at once. It also erases whatever the OVER flash
+     * left. Legend and unused keys repaint over it on the next render. */
+    game_canvas_fill(COLOR_FRAME);
 }
 
 static void lobby_drop(enum side s) {
@@ -450,25 +561,38 @@ static void c4_paint_legend(void) {
     game_paint_pos(KEY_RESET, GAME_CTL_ALT);
     game_paint_pos(GKEY_EXIT, GAME_CTL_EXIT);
     game_paint_pos(GKEY_CYCLE, GAME_CTL_CYCLE);
+    /* Thumb keys Connect 4 doesn't use. The lobby fill washes the whole
+     * canvas in frame blue, so keys with no role must be explicitly
+     * dark or they read as part of the board. */
+    game_paint_pos(GKEY_LH_TL, GAME_COLOR_OFF);
+    game_paint_pos(GKEY_RH_BM, GAME_COLOR_OFF);
+    game_paint_pos(GKEY_RH_BR, GAME_COLOR_OFF);
 }
 
-static void paint_col_cell(int c, int y, uint32_t color) {
-    game_paint(c4_gridx[c], y, color);
-}
-
+/* Paint every valid cell: piece colour, the active player's cursor on
+ * the top key of its column, or OFF. The whole grid is board now, so
+ * this is also what erases stale colour — there is no "outside the
+ * board" region left to bleed. */
 static void paint_board(void) {
-    for (int c = 0; c < COLS; c++) {
-        for (int r = 0; r < ROWS; r++) {
-            int v = C.board[c][r];
-            uint32_t col = (v == RED) ? COLOR_RED : (v == YELLOW) ? COLOR_YELLOW : GAME_COLOR_OFF;
-            paint_col_cell(c, ROWS - r, col); /* r=0 bottom → y=ROWS */
+    bool show_cursor = (C.phase == C4_PLAY) && !C.ai_pending;
+    for (int x = 0; x < n_cols; x++) {
+        for (int y = 0; y < game_board.height; y++) {
+            if (!cell_valid(x, y)) {
+                continue;
+            }
+            uint32_t col;
+            int v = C.grid[x][y];
+            if (v == RED) {
+                col = COLOR_RED;
+            } else if (v == YELLOW) {
+                col = COLOR_YELLOW;
+            } else if (show_cursor && x == C.cursor_col && y == col_top_y[x]) {
+                col = COLOR_CURSOR;
+            } else {
+                col = COLOR_FRAME; /* empty slot — visibly part of the board */
+            }
+            game_paint(x, y, col);
         }
-    }
-}
-
-static void clear_cursor_row(void) {
-    for (int c = 0; c < COLS; c++) {
-        game_paint(c4_gridx[c], 0, GAME_COLOR_OFF);
     }
 }
 
@@ -477,21 +601,21 @@ static void c4_render(void) {
 
     if (C.phase == C4_OVER) {
         int64_t age = k_uptime_get() - C.over_started;
-        bool on = ((age / 300) % 2) == 0;
-        /* Draw-grey sits above the visibility floor on purpose: channel
-         * values are scaled by global brightness (b/255), so at the
-         * default 50% a 0x30 channel renders as ~9/255 — invisible. */
-        uint32_t fc = (C.winner == RED)      ? COLOR_RED
-                      : (C.winner == YELLOW) ? COLOR_YELLOW
-                                             : GAME_COLOR(0x808080); /* draw = grey */
-        if (!on) {
-            fc = GAME_COLOR_OFF;
-        }
-        clear_cursor_row();
-        for (int c = 0; c < COLS; c++) {
-            for (int r = 0; r < ROWS; r++) {
-                paint_col_cell(c, ROWS - r, fc);
-            }
+        int8_t on = (int8_t)(((age / 300) % 2) == 0);
+        if (on != C.flash_on) {
+            C.flash_on = on;
+            /* Draw-grey sits above the visibility floor on purpose:
+             * channel values are scaled by global brightness (b/255),
+             * so at the default 50% a 0x30 channel renders as ~9/255 —
+             * invisible. */
+            uint32_t fc = (C.winner == RED)      ? COLOR_RED
+                          : (C.winner == YELLOW) ? COLOR_YELLOW
+                                                 : GAME_COLOR(0x808080); /* draw = grey */
+            /* Whole-canvas flash as ONE fill per flip — 68 per-pixel
+             * writes per flip overran the split queue and left flash
+             * remnants on the peripheral. Legend rides on top. */
+            game_canvas_fill(on ? fc : GAME_COLOR_OFF);
+            c4_paint_legend();
         }
         game_paint_pos(KEY_RH_DROP, GAME_CTL_SELECT);
         game_paint_pos(KEY_LH_DROP, GAME_CTL_SELECT);
@@ -499,7 +623,6 @@ static void c4_render(void) {
     }
 
     paint_board();
-    clear_cursor_row();
 
     if (C.phase == C4_LOBBY) {
         uint8_t b = (uint8_t)(pulse_amp() * 4);
@@ -509,11 +632,10 @@ static void c4_render(void) {
         return;
     }
 
-    /* PLAY: white column cursor on the top row over the active column. */
-    game_paint(c4_gridx[C.cursor_col], 0, COLOR_CURSOR);
+    /* PLAY: active side's drop key lit in the current colour; idle side
+     * dim so both players always know whose turn it is. */
     enum side as = active_side();
     uint32_t turn_rgb = turn_color_rgb(C.turn);
-    /* Active side's drop key lit in the current colour; idle side dim. */
     game_paint_pos(KEY_RH_DROP, (as == SIDE_RIGHT) ? turn_rgb : GAME_COLOR(0x101010));
     game_paint_pos(KEY_LH_DROP, (as == SIDE_LEFT) ? turn_rgb : GAME_COLOR(0x101010));
 }
@@ -521,12 +643,8 @@ static void c4_render(void) {
 /* ─── Module hooks ─────────────────────────────────────────────────── */
 
 static void c4_enter(void) {
-    build_col_order();
-    /* Establish a clean grid canvas: cells outside the board region would
-     * otherwise bleed the layer's DT colour (only board cells get
-     * repainted each frame). On cycle-in the runtime already cleared, so
-     * this is mostly a dirty-cache no-op then. */
-    game_paint_clear();
+    init_geometry();
+    /* Canvas is already blank — the runtime fills it before enter. */
     to_lobby();
     c4_render();
 }
