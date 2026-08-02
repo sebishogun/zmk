@@ -26,7 +26,11 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
 #include <string.h>
+#include <stdlib.h>
 #include <zephyr/logging/log.h>
+#if IS_ENABLED(CONFIG_SETTINGS)
+#include <zephyr/settings/settings.h>
+#endif
 LOG_MODULE_REGISTER(behavior_slot_macro, CONFIG_ZMK_LOG_LEVEL);
 
 #include <drivers/behavior.h>
@@ -62,24 +66,108 @@ const struct zmk_slot_macro_state *zmk_slot_macro_get(size_t index) {
     return &slot_state[index];
 }
 
-int zmk_slot_macro_set(size_t index, const struct zmk_slot_macro_binding *bindings,
-                       size_t bindings_len, uint16_t wait_ms, uint16_t tap_ms) {
+/* Write a slot's storage. Shared by the RPC path (which then persists)
+ * and the settings-load path (which must NOT re-persist what it just
+ * read). Copy data first, publish length last: concurrent readers see
+ * either the old length or the new length; never a torn array. */
+static int slot_apply(size_t index, const struct zmk_slot_macro_binding *bindings,
+                      size_t bindings_len, uint16_t wait_ms, uint16_t tap_ms) {
     if (index >= SLOT_COUNT)
         return -EINVAL;
     if (bindings_len > BINDINGS_MAX)
         return -EOVERFLOW;
 
-    /* Copy data first, publish length last. Concurrent readers see
-     * either the old length or the new length; never a torn array. */
     for (size_t i = 0; i < bindings_len; i++) {
         slot_storage[index].bindings[i] = bindings[i];
     }
     slot_storage[index].wait_ms = wait_ms;
     slot_storage[index].tap_ms = tap_ms;
     atomic_set(&slot_storage[index].bindings_len, (atomic_val_t)bindings_len);
+    return 0;
+}
 
+#if IS_ENABLED(CONFIG_SETTINGS)
+/* On-flash record: header + `len` bindings. Every member is naturally
+ * aligned, so the layout needs no packing — the asserts below lock the
+ * on-flash shape so it can't silently drift with the in-RAM structs
+ * (a drift would make old NVS records mis-parse after an upgrade). */
+struct slot_nvs_rec {
+    uint16_t wait_ms;
+    uint16_t tap_ms;
+    uint16_t len;
+    uint16_t _reserved;
+    struct zmk_slot_macro_binding bindings[BINDINGS_MAX];
+};
+BUILD_ASSERT(offsetof(struct slot_nvs_rec, bindings) == 8, "slot NVS header must stay 8 bytes");
+BUILD_ASSERT(sizeof(struct zmk_slot_macro_binding) == 12, "slot NVS binding must stay 12 bytes");
+
+static void slot_persist(size_t index) {
+    struct slot_nvs_rec rec = {
+        .wait_ms = slot_storage[index].wait_ms,
+        .tap_ms = slot_storage[index].tap_ms,
+        .len = (uint16_t)atomic_get(&slot_storage[index].bindings_len),
+        ._reserved = 0,
+    };
+    for (size_t i = 0; i < rec.len; i++) {
+        rec.bindings[i] = slot_storage[index].bindings[i];
+    }
+    char path[24];
+    snprintf(path, sizeof(path), "slotmac/%u", (unsigned)index);
+    size_t sz = offsetof(struct slot_nvs_rec, bindings) +
+                (size_t)rec.len * sizeof(struct zmk_slot_macro_binding);
+    int rc = settings_save_one(path, &rec, sz);
+    if (rc) {
+        LOG_ERR("slot %zu: settings save failed (%d)", index, rc);
+    }
+}
+
+static int slot_settings_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg) {
+    const char *next;
+    if (settings_name_next(name, &next) <= 0 || next) {
+        return -ENOENT;
+    }
+    char *end;
+    unsigned long idx = strtoul(name, &end, 10);
+    if (end == name || *end != '\0' || idx >= SLOT_COUNT) {
+        return -ENOENT;
+    }
+    struct slot_nvs_rec rec;
+    if (len < offsetof(struct slot_nvs_rec, bindings) || len > sizeof(rec)) {
+        LOG_WRN("slot %lu: bad record size %u — ignoring", idx, (unsigned)len);
+        return -EINVAL;
+    }
+    if (read_cb(cb_arg, &rec, len) < 0) {
+        return -EINVAL;
+    }
+    size_t stored = (len - offsetof(struct slot_nvs_rec, bindings)) /
+                    sizeof(struct zmk_slot_macro_binding);
+    size_t n = MIN((size_t)rec.len, stored);
+    if (n > BINDINGS_MAX) {
+        n = BINDINGS_MAX;
+    }
+    slot_apply(idx, rec.bindings, n, rec.wait_ms, rec.tap_ms);
+    LOG_INF("slot %lu restored from NVS: %zu bindings", idx, n);
+    return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(slot_macro, "slotmac", NULL, slot_settings_set, NULL, NULL);
+#endif /* CONFIG_SETTINGS */
+
+int zmk_slot_macro_set(size_t index, const struct zmk_slot_macro_binding *bindings,
+                       size_t bindings_len, uint16_t wait_ms, uint16_t tap_ms) {
+    int rc = slot_apply(index, bindings, bindings_len, wait_ms, tap_ms);
+    if (rc) {
+        return rc;
+    }
     LOG_INF("slot %zu rewritten: %zu bindings, wait=%u tap=%u", index, bindings_len, wait_ms,
             tap_ms);
+#if IS_ENABLED(CONFIG_SETTINGS)
+    /* Persist so the slot survives reboot AND reflash — the pool used
+     * to be RAM-only, which meant every power-cycle silently emptied
+     * every macro until the editor was connected over USB again. An
+     * empty set persists too, so deleting a macro sticks. */
+    slot_persist(index);
+#endif
     return 0;
 }
 

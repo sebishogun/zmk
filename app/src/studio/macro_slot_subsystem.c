@@ -23,7 +23,13 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #define BEHAVIOR_RESPONSE(type, ...) ZMK_RPC_RESPONSE(behaviors, type, __VA_ARGS__)
 
-#if IS_ENABLED(CONFIG_ZMK_STUDIO_MACRO_SLOT_POOL)
+/* Gate on the DT compat as well as the Kconfig: the slot behavior driver
+ * only compiles when the keymap actually declares slot_macro_<N> nodes
+ * (the editor emits Kconfig + DT together), so a conf that flips the
+ * Kconfig on without the nodes must compile this subsystem out too or
+ * the build dies at link on zmk_slot_macro_get/_set. */
+#if IS_ENABLED(CONFIG_ZMK_STUDIO_MACRO_SLOT_POOL) &&                                               \
+    DT_HAS_COMPAT_STATUS_OKAY(zmk_behavior_slot_macro)
 
 #define SLOT_COUNT CONFIG_ZMK_STUDIO_MACRO_SLOT_COUNT
 #define BINDINGS_MAX CONFIG_ZMK_STUDIO_MACRO_SLOT_BINDINGS_MAX
