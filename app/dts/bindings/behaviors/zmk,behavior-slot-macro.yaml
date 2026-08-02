@@ -12,3 +12,18 @@ description: AuroraKey runtime-mutable macro slot
 compatible: "zmk,behavior-slot-macro"
 
 include: one_param.yaml
+
+properties:
+  # Build-time default contents. The editor's codegen bakes the slot's
+  # configured bindings in here so a freshly flashed UF2 carries every
+  # macro with zero USB involvement; the RPC push (and its NVS record)
+  # override these at runtime for live editing.
+  bindings:
+    type: phandle-array
+    required: false
+  wait-ms:
+    type: int
+    required: false
+  tap-ms:
+    type: int
+    required: false
