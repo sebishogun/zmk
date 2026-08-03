@@ -26,13 +26,18 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
 #include <string.h>
+#include <stdlib.h>
 #include <zephyr/logging/log.h>
+#if IS_ENABLED(CONFIG_SETTINGS)
+#include <zephyr/settings/settings.h>
+#endif
 LOG_MODULE_REGISTER(behavior_slot_macro, CONFIG_ZMK_LOG_LEVEL);
 
 #include <drivers/behavior.h>
 #include <zmk/behavior.h>
 #include <zmk/behavior_queue.h>
 #include <zmk/behavior_slot_macro.h>
+#include <zmk/keymap.h>
 
 #if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT) && IS_ENABLED(CONFIG_ZMK_STUDIO_MACRO_SLOT_POOL)
 
@@ -53,6 +58,26 @@ static struct {
 
 static struct zmk_slot_macro_state slot_state[SLOT_COUNT];
 
+/* Build-time default contents, extracted from the slot node's DT
+ * `bindings` property. The editor's codegen bakes the workspace's slot
+ * bindings in here, so a freshly flashed UF2 carries every macro with
+ * no USB involvement at all. These are full zmk_behavior_binding
+ * entries (behavior name + params) and play back directly — no studio
+ * local-id resolution, exactly like a static zmk,behavior-macro.
+ *
+ * Precedence at press time: RAM contents (RPC push / NVS restore) win;
+ * DT defaults are the fallback when the slot is empty. Deleting a
+ * macro in the editor removes both the DT property (next build) and
+ * the RAM contents (empty push persisted to NVS). */
+struct slot_macro_cfg {
+    const struct zmk_behavior_binding *defaults;
+    size_t defaults_len;
+    uint16_t default_wait_ms;
+    uint16_t default_tap_ms;
+};
+
+static const struct slot_macro_cfg *slot_defaults[SLOT_COUNT];
+
 const struct zmk_slot_macro_state *zmk_slot_macro_get(size_t index) {
     if (index >= SLOT_COUNT)
         return NULL;
@@ -62,24 +87,108 @@ const struct zmk_slot_macro_state *zmk_slot_macro_get(size_t index) {
     return &slot_state[index];
 }
 
-int zmk_slot_macro_set(size_t index, const struct zmk_slot_macro_binding *bindings,
-                       size_t bindings_len, uint16_t wait_ms, uint16_t tap_ms) {
+/* Write a slot's storage. Shared by the RPC path (which then persists)
+ * and the settings-load path (which must NOT re-persist what it just
+ * read). Copy data first, publish length last: concurrent readers see
+ * either the old length or the new length; never a torn array. */
+static int slot_apply(size_t index, const struct zmk_slot_macro_binding *bindings,
+                      size_t bindings_len, uint16_t wait_ms, uint16_t tap_ms) {
     if (index >= SLOT_COUNT)
         return -EINVAL;
     if (bindings_len > BINDINGS_MAX)
         return -EOVERFLOW;
 
-    /* Copy data first, publish length last. Concurrent readers see
-     * either the old length or the new length; never a torn array. */
     for (size_t i = 0; i < bindings_len; i++) {
         slot_storage[index].bindings[i] = bindings[i];
     }
     slot_storage[index].wait_ms = wait_ms;
     slot_storage[index].tap_ms = tap_ms;
     atomic_set(&slot_storage[index].bindings_len, (atomic_val_t)bindings_len);
+    return 0;
+}
 
+#if IS_ENABLED(CONFIG_SETTINGS)
+/* On-flash record: header + `len` bindings. Every member is naturally
+ * aligned, so the layout needs no packing — the asserts below lock the
+ * on-flash shape so it can't silently drift with the in-RAM structs
+ * (a drift would make old NVS records mis-parse after an upgrade). */
+struct slot_nvs_rec {
+    uint16_t wait_ms;
+    uint16_t tap_ms;
+    uint16_t len;
+    uint16_t _reserved;
+    struct zmk_slot_macro_binding bindings[BINDINGS_MAX];
+};
+BUILD_ASSERT(offsetof(struct slot_nvs_rec, bindings) == 8, "slot NVS header must stay 8 bytes");
+BUILD_ASSERT(sizeof(struct zmk_slot_macro_binding) == 12, "slot NVS binding must stay 12 bytes");
+
+static void slot_persist(size_t index) {
+    struct slot_nvs_rec rec = {
+        .wait_ms = slot_storage[index].wait_ms,
+        .tap_ms = slot_storage[index].tap_ms,
+        .len = (uint16_t)atomic_get(&slot_storage[index].bindings_len),
+        ._reserved = 0,
+    };
+    for (size_t i = 0; i < rec.len; i++) {
+        rec.bindings[i] = slot_storage[index].bindings[i];
+    }
+    char path[24];
+    snprintf(path, sizeof(path), "slotmac/%u", (unsigned)index);
+    size_t sz = offsetof(struct slot_nvs_rec, bindings) +
+                (size_t)rec.len * sizeof(struct zmk_slot_macro_binding);
+    int rc = settings_save_one(path, &rec, sz);
+    if (rc) {
+        LOG_ERR("slot %zu: settings save failed (%d)", index, rc);
+    }
+}
+
+static int slot_settings_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg) {
+    const char *next;
+    if (settings_name_next(name, &next) <= 0 || next) {
+        return -ENOENT;
+    }
+    char *end;
+    unsigned long idx = strtoul(name, &end, 10);
+    if (end == name || *end != '\0' || idx >= SLOT_COUNT) {
+        return -ENOENT;
+    }
+    struct slot_nvs_rec rec;
+    if (len < offsetof(struct slot_nvs_rec, bindings) || len > sizeof(rec)) {
+        LOG_WRN("slot %lu: bad record size %u — ignoring", idx, (unsigned)len);
+        return -EINVAL;
+    }
+    if (read_cb(cb_arg, &rec, len) < 0) {
+        return -EINVAL;
+    }
+    size_t stored = (len - offsetof(struct slot_nvs_rec, bindings)) /
+                    sizeof(struct zmk_slot_macro_binding);
+    size_t n = MIN((size_t)rec.len, stored);
+    if (n > BINDINGS_MAX) {
+        n = BINDINGS_MAX;
+    }
+    slot_apply(idx, rec.bindings, n, rec.wait_ms, rec.tap_ms);
+    LOG_INF("slot %lu restored from NVS: %zu bindings", idx, n);
+    return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(slot_macro, "slotmac", NULL, slot_settings_set, NULL, NULL);
+#endif /* CONFIG_SETTINGS */
+
+int zmk_slot_macro_set(size_t index, const struct zmk_slot_macro_binding *bindings,
+                       size_t bindings_len, uint16_t wait_ms, uint16_t tap_ms) {
+    int rc = slot_apply(index, bindings, bindings_len, wait_ms, tap_ms);
+    if (rc) {
+        return rc;
+    }
     LOG_INF("slot %zu rewritten: %zu bindings, wait=%u tap=%u", index, bindings_len, wait_ms,
             tap_ms);
+#if IS_ENABLED(CONFIG_SETTINGS)
+    /* Persist so the slot survives reboot AND reflash — the pool used
+     * to be RAM-only, which meant every power-cycle silently emptied
+     * every macro until the editor was connected over USB again. An
+     * empty set persists too, so deleting a macro sticks. */
+    slot_persist(index);
+#endif
     return 0;
 }
 
@@ -152,7 +261,19 @@ static int on_slot_macro_pressed(struct zmk_behavior_binding *binding,
      * uses the new set. */
     size_t n = (size_t)atomic_get(&slot_storage[slot_idx].bindings_len);
     if (n == 0) {
-        return ZMK_BEHAVIOR_OPAQUE; /* empty slot = no-op */
+        /* No RPC/NVS contents — fall back to the DT-baked defaults so
+         * a fresh flash fires the workspace's macro with zero USB. */
+        const struct slot_macro_cfg *cfg = slot_defaults[slot_idx];
+        if (!cfg || cfg->defaults_len == 0) {
+            return ZMK_BEHAVIOR_OPAQUE; /* genuinely empty slot = no-op */
+        }
+        int dwait = cfg->default_wait_ms ? cfg->default_wait_ms : CONFIG_ZMK_MACRO_DEFAULT_WAIT_MS;
+        int dtap = cfg->default_tap_ms ? cfg->default_tap_ms : CONFIG_ZMK_MACRO_DEFAULT_TAP_MS;
+        for (size_t i = 0; i < cfg->defaults_len; i++) {
+            zmk_behavior_queue_add(&event, cfg->defaults[i], true, dtap);
+            zmk_behavior_queue_add(&event, cfg->defaults[i], false, dwait);
+        }
+        return ZMK_BEHAVIOR_OPAQUE;
     }
 
     /* Default timing — match upstream behavior_macro defaults so
@@ -242,22 +363,64 @@ static const struct behavior_driver_api behavior_slot_macro_driver_api = {
 #endif
 };
 static int behavior_slot_macro_init(const struct device *dev) {
-    ARG_UNUSED(dev);
-    /* Initialise state pointers so zmk_slot_macro_get works before
-     * the first set call. */
-    for (size_t i = 0; i < SLOT_COUNT; i++) {
-        slot_state[i].bindings = slot_storage[i].bindings;
-        slot_state[i].bindings_len = 0;
-        slot_state[i].wait_ms = 0;
-        slot_state[i].tap_ms = 0;
-        atomic_set(&slot_storage[i].bindings_len, 0);
+    /* One-time pool init: state pointers so zmk_slot_macro_get works
+     * before the first set call. Runs once, not once per instance. */
+    static bool pool_initialised;
+    if (!pool_initialised) {
+        pool_initialised = true;
+        for (size_t i = 0; i < SLOT_COUNT; i++) {
+            slot_state[i].bindings = slot_storage[i].bindings;
+            slot_state[i].bindings_len = 0;
+            slot_state[i].wait_ms = 0;
+            slot_state[i].tap_ms = 0;
+            atomic_set(&slot_storage[i].bindings_len, 0);
+        }
+    }
+    /* Register this instance's DT-baked defaults under its slot index.
+     * The device name is the DT node name ("slot_macro_<N>"), the same
+     * identity press-time dispatch keys off. */
+    const struct slot_macro_cfg *cfg = dev->config;
+    int idx = slot_idx_from_dev_name(dev->name);
+    if (cfg && idx >= 0) {
+        slot_defaults[idx] = cfg;
+        if (cfg->defaults_len > 0) {
+            LOG_DBG("slot %d: %zu DT-baked default bindings", idx, cfg->defaults_len);
+        }
     }
     return 0;
 }
 
+/* Instances WITH a `bindings` property get their contents extracted the
+ * same way behavior_macro.c extracts a static macro's; instances
+ * without one get an empty cfg. COND_CODE_1 splits the two shapes
+ * because DT_INST_PROP_LEN doesn't compile against an absent property. */
+#define SLOT_TRANSFORMED_BINDINGS(n)                                                               \
+    {LISTIFY(DT_INST_PROP_LEN(n, bindings), ZMK_KEYMAP_EXTRACT_BINDING, (, ), DT_DRV_INST(n))}
+
+#define SLOT_CFG_WITH_DEFAULTS(n)                                                                  \
+    static const struct zmk_behavior_binding slot_macro_defaults_##n[] =                           \
+        SLOT_TRANSFORMED_BINDINGS(n);                                                              \
+    static const struct slot_macro_cfg slot_macro_cfg_##n = {                                      \
+        .defaults = slot_macro_defaults_##n,                                                       \
+        .defaults_len = ARRAY_SIZE(slot_macro_defaults_##n),                                       \
+        .default_wait_ms = DT_INST_PROP_OR(n, wait_ms, 0),                                         \
+        .default_tap_ms = DT_INST_PROP_OR(n, tap_ms, 0),                                           \
+    };
+
+#define SLOT_CFG_EMPTY(n)                                                                          \
+    static const struct slot_macro_cfg slot_macro_cfg_##n = {                                      \
+        .defaults = NULL,                                                                          \
+        .defaults_len = 0,                                                                         \
+        .default_wait_ms = 0,                                                                      \
+        .default_tap_ms = 0,                                                                       \
+    };
+
 #define KP_INST(n)                                                                                 \
-    BEHAVIOR_DT_INST_DEFINE(n, behavior_slot_macro_init, NULL, NULL, NULL, POST_KERNEL,            \
-                            CONFIG_KERNEL_INIT_PRIORITY_DEFAULT, &behavior_slot_macro_driver_api);
+    COND_CODE_1(DT_INST_NODE_HAS_PROP(n, bindings), (SLOT_CFG_WITH_DEFAULTS(n)),                   \
+                (SLOT_CFG_EMPTY(n)))                                                               \
+    BEHAVIOR_DT_INST_DEFINE(n, behavior_slot_macro_init, NULL, NULL, &slot_macro_cfg_##n,          \
+                            POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,                      \
+                            &behavior_slot_macro_driver_api);
 
 DT_INST_FOREACH_STATUS_OKAY(KP_INST)
 
